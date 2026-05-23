@@ -16,10 +16,7 @@ import {
   pollKreaJob,
   downloadGlb,
 } from './krea3d';
-import {
-  generate3DWithReplicate,
-  hasReplicateToken,
-} from './replicate3d';
+
 import { Model, MeshFileType } from '@shared/types';
 import { query } from './dbClient';
 import {
@@ -33,10 +30,11 @@ import { logApiError, logError } from './serverLog';
 import { Buffer } from 'node:buffer';
 import { env, requiredEnv, webhookBaseUrl } from './env';
 
-// Token costs by quality tier — maps to actual inference cost differences
+// Token costs by quality tier — maps to seed image quality differences
+// (All tiers use Krea 3D for the mesh generation itself.)
 // fast:    low-quality seed image + Krea 3D  (~$0.02 total)
 // quality: high-quality seed image + Krea 3D (~$0.25 total)
-// ultra:   high-quality seed image + Replicate TRELLIS-2 (~$0.30 total)
+// ultra:   high-quality seed image + Krea 3D (~$0.25 total, reserved for future higher-quality Krea models)
 const MESH_TOKEN_COSTS: Record<Model, number> = {
   fast: 15,
   quality: 30,
@@ -1048,19 +1046,17 @@ async function submitMeshJob(
     debugLog('model value:', model);
 
     // ========================================================================
-    // 3D QUALITY TIER SYSTEM
+    // 3D QUALITY TIER SYSTEM — All tiers use Krea API
     // ========================================================================
-    // fast    → Krea basic TRELLIS (low-poly, textured, ~30s) — game assets
-    // quality → Krea basic TRELLIS (same as fast for now — Krea only has one
-    //           node app available via API)
-    // ultra   → Replicate TRELLIS-2 (high-poly, PBR, ~1-3min) — 3D printing
-    //           Falls back to Krea if REPLICATE_API_TOKEN is not set.
+    // fast    → Krea basic TRELLIS, low-quality seed image (cheapest)
+    // quality → Krea basic TRELLIS, high-quality seed image
+    // ultra   → Krea basic TRELLIS, high-quality seed image + max polish
+    //           (All tiers use the same Krea node app for now — differentiation
+    //            is in seed image quality and future-proofing for when Krea
+    //            exposes higher-quality 3D models via API.)
     // ========================================================================
 
-    const useReplicate = model === 'ultra' && hasReplicateToken();
-    const backend = useReplicate ? 'replicate-trellis-2' : 'krea-basic';
-
-    debugLog(`=== 3D GENERATION: model=${model} backend=${backend} ===`);
+    debugLog(`=== 3D GENERATION: model=${model} backend=krea-basic ===`);
 
     if (model === 'ultra') {
       debugLog('=== ENTERING ULTRA MODEL PATH ===');
@@ -1159,12 +1155,7 @@ async function submitMeshJob(
         60,
       );
 
-      if (useReplicate) {
-        await generate3DWithReplicate(baseImageUrl, meshId, userId, conversationId);
-      } else {
-        debugLog('REPLICATE_API_TOKEN not set, falling back to Krea for ultra');
-        await generate3DWithKrea(baseImageUrl, meshId, userId, conversationId);
-      }
+      await generate3DWithKrea(baseImageUrl, meshId, userId, conversationId);
     } else if (model === 'quality') {
       debugLog('=== ENTERING QUALITY MODEL PATH ===');
 
@@ -1194,12 +1185,9 @@ async function submitMeshJob(
       appBaseUrl,
     });
 
-    const backend = model === 'ultra' && hasReplicateToken()
-      ? 'Replicate TRELLIS-2'
-      : 'Krea 3D';
     logApiError(error, {
       functionName: 'mesh',
-      apiName: backend,
+      apiName: 'Krea 3D',
       statusCode: 500,
       userId,
       conversationId,
