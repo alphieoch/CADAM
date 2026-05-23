@@ -14,8 +14,9 @@ import {
   getServiceRoleSupabaseClient,
   type SupabaseClient,
 } from './supabaseClient';
+import { getUserFromRequest } from './auth';
 import { reformatSignedUrl } from './messageUtils';
-import { billing, BillingClientError } from './billingClient';
+import { billing, BillingClientError } from './stripeBilling';
 import { logApiError, logError } from './serverLog';
 import { Buffer } from 'node:buffer';
 import { env, requiredEnv, webhookBaseUrl } from './env';
@@ -338,7 +339,12 @@ async function getRecentMeshPreview(
 let falConfigured = false;
 function ensureFalConfig() {
   if (falConfigured) return;
-  fal.config({ credentials: requiredEnv('FAL_KEY') });
+  const falKey = env('FAL_KEY');
+  if (!falKey) {
+    console.warn('FAL_KEY is not set — mesh generation will be unavailable');
+    return;
+  }
+  fal.config({ credentials: falKey });
   falConfigured = true;
 }
 
@@ -376,46 +382,17 @@ export async function handleMeshRequest(req: Request) {
       });
     }
 
-    // Authenticate user using bearer token
+    // Authenticate user using JWT cookie
     debugLog('=== AUTHENTICATING USER ===');
-    const authHeader = req.headers.get('Authorization');
-    const token = authHeader?.replace('Bearer ', '');
-    debugLog('Auth header present:', !!authHeader);
-    if (!token) {
-      return new Response(
-        JSON.stringify({ error: { message: 'Unauthorized' } }),
-        {
-          status: 401,
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-        },
-      );
-    }
-
+    const user = await getUserFromRequest(req);
     const supabaseClient = getSupabaseClient();
-    const { data: userData, error: userError } =
-      await supabaseClient.auth.getUser(token);
-
-    if (!userData.user) {
-      logError(new Error('No user found in token'), {
+    if (!user?.id || !user.email) {
+      logError(new Error('No user found in JWT cookie'), {
         functionName: 'mesh',
         statusCode: 401,
       });
       return new Response(
         JSON.stringify({ error: { message: 'Unauthorized' } }),
-        {
-          status: 401,
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-        },
-      );
-    }
-
-    if (userError) {
-      logError(userError, {
-        functionName: 'mesh',
-        statusCode: 401,
-      });
-      return new Response(
-        JSON.stringify({ error: { message: userError.message } }),
         {
           status: 401,
           headers: { ...corsHeaders, 'Content-Type': 'application/json' },
@@ -424,7 +401,7 @@ export async function handleMeshRequest(req: Request) {
     }
 
     // Deduct tokens for mesh operation via adam-billing
-    if (!userData.user.email) {
+    if (!user.email) {
       return new Response(
         JSON.stringify({ error: { message: 'User email missing' } }),
         {
@@ -434,11 +411,31 @@ export async function handleMeshRequest(req: Request) {
       );
     }
 
+    // Check that required AI service keys are configured
+    const hasFalKey = !!env('FAL_KEY');
+    const hasOpenAIKey = !!env('OPENAI_API_KEY');
+    const hasGoogleKey = !!env('GOOGLE_API_KEY');
+    if (!hasFalKey && !hasOpenAIKey && !hasGoogleKey) {
+      return new Response(
+        JSON.stringify({
+          error: {
+            message:
+              'Mesh generation is not configured. FAL_KEY, OPENAI_API_KEY, or GOOGLE_API_KEY must be set.',
+            code: 'mesh_not_configured',
+          },
+        }),
+        {
+          status: 503,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        },
+      );
+    }
+
     ensureFalConfig();
     const appBaseUrl = webhookBaseUrl(req.url);
     const meshReferenceId = crypto.randomUUID();
     try {
-      const result = await billing.consume(userData.user.email, {
+      const result = await billing.consume(user.email, {
         tokens: MESH_TOKEN_COST,
         operation: 'mesh',
         referenceId: meshReferenceId,
@@ -464,7 +461,7 @@ export async function handleMeshRequest(req: Request) {
       logError(err, {
         functionName: 'mesh',
         statusCode: status,
-        userId: userData.user.id,
+        userId: user.id,
       });
       return new Response(
         JSON.stringify({ error: { message: 'billing_unavailable' } }),
@@ -511,7 +508,7 @@ export async function handleMeshRequest(req: Request) {
       logError(new Error('Conversation ID is required'), {
         functionName: 'mesh',
         statusCode: 400,
-        userId: userData.user?.id,
+        userId: user?.id,
       });
       return new Response(
         JSON.stringify({ error: { message: 'Conversation ID is required' } }),
@@ -530,7 +527,7 @@ export async function handleMeshRequest(req: Request) {
       logError(new Error('Images or text not found'), {
         functionName: 'mesh',
         statusCode: 400,
-        userId: userData.user?.id,
+        userId: user?.id,
         conversationId,
         additionalContext: {
           hasImages: !!images,
@@ -564,7 +561,7 @@ export async function handleMeshRequest(req: Request) {
     const { data: meshData, error: meshError } = await supabaseClient
       .from('meshes')
       .insert({
-        user_id: userData.user.id,
+        user_id: user.id,
         images: images ?? null,
         conversation_id: conversationId,
         file_type: fileType,
@@ -582,7 +579,7 @@ export async function handleMeshRequest(req: Request) {
       logError(meshError, {
         functionName: 'mesh',
         statusCode: 500,
-        userId: userData.user?.id,
+        userId: user?.id,
         conversationId,
         additionalContext: {
           operation: 'insert_mesh_record',
@@ -607,7 +604,7 @@ export async function handleMeshRequest(req: Request) {
           text,
           images,
           mesh,
-          userData.user.id,
+          user.id,
           conversationId,
           meshData.id,
           appBaseUrl,
@@ -627,7 +624,7 @@ export async function handleMeshRequest(req: Request) {
         text,
         images,
         mesh,
-        userData.user.id,
+        user.id,
         conversationId,
         meshData.id,
         model ?? 'quality',

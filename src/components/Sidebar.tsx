@@ -16,7 +16,7 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { useAuth } from '@/contexts/AuthContext';
-import { supabase } from '@/lib/supabase';
+import { apiJson } from '@/services/api';
 import {
   Sheet,
   SheetContent,
@@ -52,17 +52,10 @@ function DesktopSidebar({ isSidebarOpen, setIsSidebarOpen }: SidebarProps) {
     queryKey: ['conversations', 'recent'],
     initialData: [],
     queryFn: async () => {
-      const { data, error } = await supabase
-        .from('conversations')
-        .select('*')
-        .order('updated_at', { ascending: false })
-        .eq('user_id', user?.id ?? '')
-        .limit(10)
-        .overrideTypes<Array<{ settings: ConversationSettings }>>();
-
-      if (error) throw error;
-
-      return data;
+      const data = await apiJson('conversations', {
+        method: 'GET',
+      }) as Conversation[];
+      return (data || []).slice(0, 10);
     },
   });
 

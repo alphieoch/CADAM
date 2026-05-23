@@ -23,7 +23,7 @@ import {
   type ChatMessage,
 } from '@/lib/aiMessages';
 import parseParameters from '@shared/parseParameters';
-import { supabase } from '@/lib/supabase';
+// Removed supabase import - using API endpoints instead
 import { updateParameter } from '@/lib/utils';
 import {
   persistAssistantParts,
@@ -71,30 +71,28 @@ export default function EditorView() {
     enabled: !!conversationId,
     queryFn: async () => {
       if (!conversationId) throw new Error('Conversation ID is required');
-      const { data, error } = await supabase
-        .from('conversations')
-        .select('*')
-        .eq('id', conversationId)
-        .eq('user_id', user?.id ?? '')
-        .limit(1)
-        .single();
-      if (error) throw error;
-      return data as Conversation;
+      const res = await fetch(`${import.meta.env.BASE_URL}/api/conversations/${conversationId}`, {
+        credentials: 'include',
+      });
+      if (!res.ok) {
+        if (res.status === 404) throw new Error('Conversation not found');
+        throw new Error('Failed to load conversation');
+      }
+      return res.json() as Promise<Conversation>;
     },
   });
 
   const { mutate: updateConversation, mutateAsync: updateConversationAsync } =
     useMutation({
       mutationFn: async (conversation: Conversation) => {
-        const { data, error } = await supabase
-          .from('conversations')
-          .update(conversation)
-          .eq('id', conversation.id)
-          .select()
-          .single()
-          .overrideTypes<Conversation>();
-        if (error) throw error;
-        return data;
+        const res = await fetch(`${import.meta.env.BASE_URL}/api/conversations/${conversation.id}`, {
+          method: 'PATCH',
+          credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(conversation),
+        });
+        if (!res.ok) throw new Error('Failed to update conversation');
+        return res.json() as Promise<Conversation>;
       },
       onMutate(conversation) {
         const oldConversation = queryClient.getQueryData<Conversation>([
@@ -265,7 +263,6 @@ function ConversationEditor() {
       await ensureInputRecords({
         parts,
         conversationId: conversation.id,
-        userId: user.id,
       });
       const parentMessageId = conversation.current_message_leaf_id ?? null;
       const userMessageId = await persistUserMessage({
@@ -305,7 +302,6 @@ function ConversationEditor() {
       await ensureInputRecords({
         parts,
         conversationId: conversation.id,
-        userId: user.id,
       });
       const parentId = original.parent_message_id;
       const newUserMessageId = await persistUserMessage({
@@ -335,16 +331,20 @@ function ConversationEditor() {
       // 'assistant'); the broader `'system'` slot on UIMessage is
       // never legitimate to copy.
       const role: Message['role'] = 'assistant';
-      const { error } = await supabase.from('messages').insert({
-        id: newId,
-        conversation_id: conversation.id,
-        role,
-        parts,
-        metadata,
-        parent_message_id: assistant.parent_message_id,
-        rating: 0,
+      const res = await fetch(`${import.meta.env.BASE_URL}/api/conversations/${conversation.id}/messages`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          id: newId,
+          role,
+          parts,
+          metadata,
+          parent_message_id: assistant.parent_message_id,
+          rating: 0,
+        }),
       });
-      if (error) throw error;
+      if (!res.ok) throw new Error('Failed to restore message');
 
       // Mirror the trigger's leaf advance + add the copy to the messages
       // cache optimistically so the new branch resolves before refetch.

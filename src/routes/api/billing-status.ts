@@ -5,7 +5,7 @@ import {
   preflight,
   requireUser,
 } from '@/server/api';
-import { billing } from '@/server/billingClient';
+import { billing } from '@/server/stripeBilling';
 
 export const Route = createFileRoute('/api/billing-status')({
   server: {

@@ -1,10 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
-import { Session, User } from '@supabase/supabase-js';
-import { supabase } from '@/lib/supabase';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useNavigate } from '@tanstack/react-router';
 import posthog from 'posthog-js';
-import { AuthContext, type BillingStatus, getLevel } from './AuthContext';
+import { AuthContext, type BillingStatus, getLevel, type AuthUser } from './AuthContext';
 import { apiJson } from '@/services/api';
 import { z } from 'zod';
 
@@ -46,6 +44,14 @@ const billingStatusSchema = z.object({
   }),
 });
 
+const userSchema = z.object({
+  id: z.string(),
+  email: z.string(),
+  full_name: z.string().nullable(),
+  avatar_url: z.string().nullable(),
+  provider: z.string(),
+});
+
 const ensurePermission = async () => {
   if (typeof window === 'undefined' || !('Notification' in window)) {
     return false;
@@ -57,51 +63,39 @@ const ensurePermission = async () => {
 };
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
-  const [session, setSession] = useState<Session | null>(
-    typeof window === 'undefined'
-      ? null
-      : JSON.parse(localStorage.getItem('session') ?? 'null'),
-  );
-  const [user, setUser] = useState<User | null>(null);
+  const [user, setUser] = useState<AuthUser | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const navigate = useNavigate();
   const posthogSent = useRef(false);
   const queryClient = useQueryClient();
 
-  // Initialize auth state and set up session listener
+  // Initialize auth state from /api/auth/me
   useEffect(() => {
     const initializeAuth = async () => {
       try {
-        const {
-          data: { session },
-        } = await supabase.auth.refreshSession();
-        setSession(session);
-        localStorage.setItem('session', JSON.stringify(session));
-        setUser(session?.user ?? null);
+        const res = await fetch(`${import.meta.env.BASE_URL}/api/auth/me`, {
+          credentials: 'include',
+        });
+        if (res.ok) {
+          const data = await res.json();
+          if (data.user) {
+            const parsed = userSchema.safeParse(data.user);
+            if (parsed.success) {
+              setUser(parsed.data);
+            }
+          }
+        }
+      } catch {
+        // Auth endpoint not available, stay logged out
       } finally {
         setIsLoading(false);
       }
     };
 
     initializeAuth();
+  }, []);
 
-    const {
-      data: { subscription },
-    } = supabase.auth.onAuthStateChange((event, session) => {
-      setSession(session);
-      localStorage.setItem('session', JSON.stringify(session));
-      setUser(session?.user ?? null);
-      if (event === 'PASSWORD_RECOVERY') {
-        navigate({ to: '/update-password' });
-      }
-    });
-
-    return () => subscription.unsubscribe();
-  }, [navigate]);
-
-  // Poll adam-billing for subscription state + token balances. 30s cadence
-  // matches the prior user_extradata poll — adam-billing is the source of
-  // truth; no local realtime channel anymore.
+  // Poll adam-billing for subscription state + token balances
   const { data: billing, isLoading: isBillingLoading } = useQuery({
     queryKey: ['billing', 'status'],
     enabled: !!user,
@@ -116,165 +110,113 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     },
   });
 
-  // Fetch user's profile data directly (avoiding circular dependency)
-  const { data: profile, isLoading: isProfileLoading } = useQuery({
-    queryKey: ['profile', user?.id],
-    queryFn: async () => {
-      const { data, error } = await supabase
-        .from('profiles')
-        .select('*')
-        .eq('user_id', user?.id || '')
-        .single();
-
-      if (error) throw error;
-      return data;
-    },
-    enabled: !!user?.id,
-  });
-
-  // Initialize notifications preference once on first render after profile loads
-  useEffect(() => {
-    if (profile?.notifications_enabled) void ensurePermission();
-  }, [profile?.notifications_enabled]);
-
-  // Set up real-time subscription for meshes table to update meshData immediately and notify the user
-  useEffect(() => {
-    if (!user) {
-      return;
-    }
-
-    // Supabase realtime
-    const channel = supabase
-      .channel(`mesh-updates-${user.id}`)
-      .on(
-        'broadcast',
-        {
-          event: 'mesh-updated',
-        },
-        async ({ payload }) => {
-          if (payload.kind === 'mesh') {
-            queryClient.invalidateQueries({
-              queryKey: ['meshData', payload.id],
-            });
-            queryClient.invalidateQueries({ queryKey: ['mesh', payload.id] });
-            queryClient.invalidateQueries({ queryKey: ['billing', 'status'] });
-
-            if (
-              payload.status === 'success' &&
-              profile?.notifications_enabled &&
-              !window.location.pathname.includes(
-                `/editor/${payload.conversation_id}`,
-              )
-            ) {
-              if (await ensurePermission()) {
-                const notification = new Notification('3D model is ready', {
-                  body: 'Your generated 3D model has finished. Click to open.',
-                  icon: `${import.meta.env.BASE_URL}/Adam-Logo.png`,
-                });
-                notification.onclick = () => {
-                  window.focus();
-                  navigate({
-                    to: '/editor/$id',
-                    params: { id: payload.conversation_id },
-                  });
-                  notification.close();
-                };
-              }
-            }
-          }
-
-          if (payload.kind === 'preview') {
-            queryClient.invalidateQueries({
-              queryKey: ['preview', payload.id],
-            });
-          }
-        },
-      )
-      .subscribe();
-
-    return () => {
-      supabase.removeChannel(channel);
-    };
-  }, [user, queryClient, navigate, profile?.notifications_enabled]);
-
   // Track user in PostHog once we have all their data
   useEffect(() => {
     if (
       user &&
       !posthogSent.current &&
-      !isBillingLoading &&
-      !isProfileLoading
+      !isBillingLoading
     ) {
       posthog.identify(user.id, {
         email: user.email,
-        full_name: profile?.full_name,
+        full_name: user.full_name,
         subscription: getLevel(billing),
         has_trialed: billing?.user.hasTrialed ?? false,
       });
       posthogSent.current = true;
     }
-  }, [user, isBillingLoading, billing, profile, isProfileLoading]);
+  }, [user, isBillingLoading, billing]);
 
   const signIn = async (email: string, password: string) => {
-    const { error } = await supabase.auth.signInWithPassword({
-      email,
-      password,
+    const res = await fetch(`${import.meta.env.BASE_URL}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ email, password }),
     });
-    if (error) throw error;
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({ error: 'Login failed' }));
+      throw new Error(data.error || 'Login failed');
+    }
+    const data = await res.json();
+    if (data.user) {
+      const parsed = userSchema.safeParse(data.user);
+      if (parsed.success) setUser(parsed.data);
+    }
   };
 
   const signUp = async (email: string, password: string, name: string) => {
-    const { error: signUpError } = await supabase.auth.signUp({
-      email,
-      password,
-      options: { data: { full_name: name } },
+    const res = await fetch(`${import.meta.env.BASE_URL}/api/auth/register`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ email, password, name }),
     });
-    if (signUpError) throw signUpError;
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({ error: 'Sign up failed' }));
+      throw new Error(data.error || 'Sign up failed');
+    }
+    const data = await res.json();
+    if (data.user) {
+      const parsed = userSchema.safeParse(data.user);
+      if (parsed.success) setUser(parsed.data);
+    }
   };
 
   const signOut = async () => {
-    const { error } = await supabase.auth.signOut();
-    if (error) throw error;
+    await fetch(`${import.meta.env.BASE_URL}/api/auth/logout`, {
+      method: 'POST',
+      credentials: 'include',
+    });
+    setUser(null);
+    posthogSent.current = false;
+    queryClient.clear();
   };
 
   const signInWithMagicLink = async (email: string) => {
-    const { error } = await supabase.auth.signInWithOtp({
-      email,
-      options: { shouldCreateUser: true },
-    });
-    if (error) throw error;
+    // Not implemented in Azure-native auth yet
+    console.warn('Magic link not implemented in Azure-native auth');
+    throw new Error('Magic link not available');
+  };
+
+  const signInWithMicrosoft = async () => {
+    window.location.href = `${import.meta.env.BASE_URL}/api/auth/microsoft`;
+  };
+
+  const signInWithGoogle = async () => {
+    window.location.href = `${import.meta.env.BASE_URL}/api/auth/google`;
   };
 
   const verifyOtp = async (email: string, token: string) => {
-    const { error } = await supabase.auth.verifyOtp({
-      email,
-      token,
-      type: 'email',
-    });
-    if (error) throw error;
+    // Not implemented in Azure-native auth yet
+    console.warn('OTP verification not implemented in Azure-native auth');
+    throw new Error('OTP verification not available');
   };
 
   const resetPassword = async (email: string) => {
-    const { error } = await supabase.auth.resetPasswordForEmail(email);
-    if (error) throw error;
+    // Not implemented in Azure-native auth yet
+    console.warn('Password reset not implemented in Azure-native auth');
+    throw new Error('Password reset not available');
   };
 
   const updatePassword = async (password: string) => {
-    const { error } = await supabase.auth.updateUser({ password });
-    if (error) throw error;
+    // Not implemented in Azure-native auth yet
+    console.warn('Password update not implemented in Azure-native auth');
+    throw new Error('Password update not available');
   };
 
   return (
     <AuthContext.Provider
       value={{
-        session,
         user,
         billing: billing ?? null,
         isLoading:
-          isLoading || (!!user && (isBillingLoading || isProfileLoading)),
+          isLoading || (!!user && isBillingLoading),
         signIn,
         signUp,
         signInWithMagicLink,
+        signInWithMicrosoft,
+        signInWithGoogle,
         verifyOtp,
         signOut,
         resetPassword,

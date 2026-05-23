@@ -6,7 +6,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { useToast } from '@/hooks/use-toast';
 import { useAuth } from '@/contexts/AuthContext';
-import { supabase } from '@/lib/supabase';
+
 import { useMutation } from '@tanstack/react-query';
 import { GoogleIcon } from '@/components/icons/CompanyIcons';
 import { validateRedirectUrl } from '@/lib/utils';
@@ -26,7 +26,7 @@ export function SignUpEmailView() {
   const navigate = useNavigate();
   const location = useLocation();
   const { toast } = useToast();
-  const { signUp, session, user, isLoading: authLoading } = useAuth();
+  const { signUp, signInWithGoogle, user, isLoading: authLoading } = useAuth();
 
   // Get and validate redirect parameter from URL
   const searchParams = new URLSearchParams(location.searchStr);
@@ -35,26 +35,15 @@ export function SignUpEmailView() {
 
   // Redirect to home if already authenticated
   useEffect(() => {
-    if (!authLoading && session && user) {
+    if (!authLoading && user) {
       navigate({ to: '/', replace: true });
     }
-  }, [session, user, authLoading, navigate]);
+  }, [user, authLoading, navigate]);
 
-  const { mutate: signInWithGoogle, isPending: isSigningInWithGoogle } =
+  const { mutate: handleSignInWithGoogle, isPending: isSigningInWithGoogle } =
     useMutation({
       mutationFn: async () => {
-        // Use Supabase's built-in redirectTo parameter with validated URL
-        const redirectTo =
-          redirectPath !== '/'
-            ? getAppRedirectUrl(redirectPath)
-            : getAppRedirectUrl('/');
-
-        await supabase.auth.signInWithOAuth({
-          provider: 'google',
-          options: {
-            redirectTo,
-          },
-        });
+        await signInWithGoogle();
       },
       onError: (error) => {
         toast({
@@ -129,7 +118,7 @@ export function SignUpEmailView() {
           </div>
           <div className="w-full py-2">
             <Button
-              onClick={() => signInWithGoogle()}
+              onClick={() => handleSignInWithGoogle()}
               className="flex w-full items-center gap-2 hover:bg-adam-blue/10"
               disabled={isSigningInWithGoogle}
             >

@@ -8,12 +8,12 @@ interface AuthGuardProps {
 }
 
 export function AuthGuard({ children }: AuthGuardProps) {
-  const { session, user, isLoading } = useAuth();
+  const { user, isLoading } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
 
   useEffect(() => {
-    if (!isLoading && !session && !user) {
+    if (!isLoading && !user) {
       // Capture current path for redirect after authentication
       // Only include pathname and search to avoid security issues
       const currentPath = location.pathname + location.searchStr;
@@ -22,7 +22,6 @@ export function AuthGuard({ children }: AuthGuardProps) {
       navigate({ to: '/signin', search, replace: true });
     }
   }, [
-    session,
     user,
     navigate,
     isLoading,
@@ -38,7 +37,7 @@ export function AuthGuard({ children }: AuthGuardProps) {
     );
   }
 
-  if (!session || !user) {
+  if (!user) {
     return null;
   }
 

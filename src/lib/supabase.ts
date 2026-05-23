@@ -14,3 +14,17 @@ const supabaseUrl = rawSupabaseUrl || 'http://localhost';
 const supabaseKey = rawSupabaseKey || 'public-anon-key';
 
 export const supabase = createClient<Database>(supabaseUrl, supabaseKey);
+
+// Azure-native API client for when Supabase is not configured
+export const azureApi = {
+  async getUser() {
+    const res = await fetch(`${import.meta.env.BASE_URL}/api/me`, {
+      credentials: 'include',
+    });
+    if (!res.ok) return null;
+    return res.json();
+  },
+  async signInWithMicrosoft() {
+    window.location.href = `${import.meta.env.BASE_URL}/api/auth/microsoft`;
+  },
+};

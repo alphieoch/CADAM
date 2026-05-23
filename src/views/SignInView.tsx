@@ -13,9 +13,8 @@ import {
 import { useToast } from '@/hooks/use-toast';
 import { useAuth } from '@/contexts/AuthContext';
 import { AuthError } from '@supabase/supabase-js';
-import { supabase } from '@/lib/supabase';
 import { useMutation } from '@tanstack/react-query';
-import { GoogleIcon } from '@/components/icons/CompanyIcons';
+import { GoogleIcon, MicrosoftIcon } from '@/components/icons/CompanyIcons';
 import { validateRedirectUrl } from '@/lib/utils';
 
 function getAppRedirectUrl(path: string) {
@@ -47,8 +46,9 @@ export function SignInView() {
   const {
     signIn,
     signInWithMagicLink,
+    signInWithMicrosoft,
+    signInWithGoogle,
     verifyOtp,
-    session,
     user,
     isLoading: authLoading,
   } = useAuth();
@@ -61,26 +61,30 @@ export function SignInView() {
 
   // Redirect to home if already authenticated
   useEffect(() => {
-    if (!authLoading && session && user) {
+    if (!authLoading && user) {
       navigate({ to: '/', replace: true });
     }
-  }, [session, user, authLoading, navigate]);
+  }, [user, authLoading, navigate]);
 
-  const { mutate: signInWithGoogle, isPending: isSigningInWithGoogle } =
+  const { mutate: handleSignInWithGoogle, isPending: isSigningInWithGoogle } =
     useMutation({
       mutationFn: async () => {
-        // Use Supabase's built-in redirectTo parameter with validated URL
-        const redirectTo =
-          redirectPath !== '/'
-            ? getAppRedirectUrl(redirectPath)
-            : getAppRedirectUrl('/');
-
-        await supabase.auth.signInWithOAuth({
-          provider: 'google',
-          options: {
-            redirectTo,
-          },
+        await signInWithGoogle();
+      },
+      onError: (error) => {
+        toast({
+          title: 'Whoopsies',
+          description:
+            error instanceof Error ? error.message : 'Something went wrong',
+          variant: 'destructive',
         });
+      },
+    });
+
+  const { mutate: handleSignInWithMicrosoft, isPending: isSigningInWithMicrosoft } =
+    useMutation({
+      mutationFn: async () => {
+        await signInWithMicrosoft();
       },
       onError: (error) => {
         toast({
@@ -289,14 +293,22 @@ export function SignInView() {
               />
             </div>
           </div>
-          <div className="w-full">
+          <div className="flex flex-col gap-2">
             <Button
-              onClick={() => signInWithGoogle()}
+              onClick={() => handleSignInWithGoogle()}
               className="flex w-full items-center gap-2 hover:bg-adam-blue/10"
               disabled={isSigningInWithGoogle}
             >
               <GoogleIcon className="w-4" />
               <span>Continue with Google</span>
+            </Button>
+            <Button
+              onClick={() => handleSignInWithMicrosoft()}
+              className="flex w-full items-center gap-2 bg-[#0078D4] text-white hover:bg-[#005A9E]"
+              disabled={isSigningInWithMicrosoft}
+            >
+              <MicrosoftIcon className="w-4" />
+              <span>Continue with Microsoft</span>
             </Button>
           </div>
 

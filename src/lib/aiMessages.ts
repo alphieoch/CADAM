@@ -1,4 +1,3 @@
-import { supabase } from '@/lib/supabase';
 import type { AppUIMessage } from '@shared/chatAi';
 import { asParametricParts } from '@shared/parametricParts';
 import type { Message } from '@shared/types';
@@ -52,18 +51,16 @@ export function messageRowToChatMessage(message: Message): ChatMessage {
 
 /**
  * Walk a parts array and upsert any image/mesh rows the user attached, so the
- * supabase records exist before the chat stream references them.
+ * DB records exist before the chat stream references them.
  */
 export async function ensureInputRecords({
   parts,
   conversationId,
-  userId,
 }: {
   parts: AppUIMessage['parts'];
   conversationId: string;
-  userId: string;
 }) {
-  const imageIds = parts
+  const images = parts
     .filter(
       (
         part,
@@ -72,48 +69,42 @@ export async function ensureInputRecords({
         typeof part.mediaType === 'string' &&
         part.mediaType.startsWith('image/'),
     )
-    .map((part) => part.filename?.replace(/\.[^.]+$/, ''))
-    .filter((id): id is string => !!id);
+    .map((part) => ({
+      id: part.filename?.replace(/\.[^.]+$/, '') || '',
+      prompt: { text: 'User uploaded image' },
+      status: 'success',
+    }))
+    .filter((img) => img.id);
 
-  if (imageIds.length) {
-    await Promise.all(
-      imageIds.map(async (imageId) => {
-        const { error } = await supabase.from('images').upsert(
-          {
-            id: imageId,
-            prompt: { text: 'User uploaded image' },
-            status: 'success',
-            user_id: userId,
-            conversation_id: conversationId,
-          },
-          { onConflict: 'id', ignoreDuplicates: true },
-        );
-        if (error) throw error;
-      }),
-    );
-  }
+  const meshes = parts
+    .filter(
+      (
+        part,
+      ): part is Extract<
+        AppUIMessage['parts'][number],
+        { type: 'data-mesh-context' }
+      > => part.type === 'data-mesh-context',
+    )
+    .map((part) => ({
+      id: part.data.meshId,
+      prompt: { text: 'User uploaded mesh' },
+      status: 'success',
+      file_type: part.data.fileType,
+    }));
 
-  const meshContexts = parts.filter(
-    (
-      part,
-    ): part is Extract<
-      AppUIMessage['parts'][number],
-      { type: 'data-mesh-context' }
-    > => part.type === 'data-mesh-context',
+  if (images.length === 0 && meshes.length === 0) return;
+
+  const res = await fetch(
+    `${import.meta.env.BASE_URL}/api/conversations/${conversationId}/ensure-inputs`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ images, meshes }),
+    },
   );
-
-  for (const meshPart of meshContexts) {
-    const { error } = await supabase.from('meshes').upsert(
-      {
-        id: meshPart.data.meshId,
-        conversation_id: conversationId,
-        user_id: userId,
-        status: 'success',
-        prompt: { text: 'User uploaded mesh' },
-        file_type: meshPart.data.fileType,
-      },
-      { onConflict: 'id', ignoreDuplicates: true },
-    );
-    if (error) throw error;
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: 'Failed to ensure inputs' }));
+    throw new Error(err.error || 'Failed to ensure inputs');
   }
 }

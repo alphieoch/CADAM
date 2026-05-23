@@ -1,5 +1,5 @@
 import { createFileRoute } from '@tanstack/react-router';
-import { billing, BillingClientError } from '@/server/billingClient';
+import { billing, BillingClientError } from '@/server/stripeBilling';
 import { isRecord, json, methodNotAllowed, preflight } from '@/server/api';
 import {
   getServiceRoleSupabaseClient,

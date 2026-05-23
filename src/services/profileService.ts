@@ -1,52 +1,43 @@
 import { useAuth } from '@/contexts/AuthContext';
-import { supabase } from '@/lib/supabase';
 import { Profile } from '@shared/types';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { apiJson } from './api';
 
 export function useProfile() {
   const { user } = useAuth();
 
-  return useQuery({
+  return useQuery<Profile | null>({
     queryKey: ['profile', user?.id],
     queryFn: async () => {
-      const { data, error } = await supabase
-        .from('profiles')
-        .select('*')
-        .eq('user_id', user?.id || '')
-        .single();
-
-      if (error) throw error;
-
-      if (!data) {
-        throw new Error('Profile not found');
-      }
-
-      return data;
+      if (!user) return null;
+      // Map the AuthUser to a Profile shape for backward compatibility
+      return {
+        id: user.id,
+        user_id: user.id,
+        email: user.email,
+        full_name: user.full_name,
+        avatar_path: null,
+        updated_at: new Date().toISOString(),
+        created_at: new Date().toISOString(),
+        notifications_enabled: true,
+      } as Profile;
     },
     enabled: !!user?.id,
   });
 }
 
 export function useAvatarUrl(avatarPath: string | null | undefined) {
+  const { user } = useAuth();
+
   return useQuery({
     queryKey: ['avatar-url', avatarPath],
     queryFn: async () => {
-      if (!avatarPath) return null;
-
-      // Download the file to get a blob URL that's cached by React Query
-      const { data, error } = await supabase.storage
-        .from('images')
-        .download(avatarPath);
-
-      if (error) throw error;
-      if (!data) return null;
-
-      // Create a blob URL from the downloaded data
-      return URL.createObjectURL(data);
+      // Use the avatar_url directly from the user object
+      return user?.avatar_url || null;
     },
     enabled: !!avatarPath,
-    staleTime: 1000 * 60 * 60 * 24, // Cache for 24 hours
-    gcTime: 1000 * 60 * 60 * 24 * 7, // Keep in cache for 7 days
+    staleTime: 1000 * 60 * 60 * 24,
+    gcTime: 1000 * 60 * 60 * 24 * 7,
   });
 }
 
@@ -56,23 +47,17 @@ export function useUpdateProfile() {
 
   return useMutation({
     mutationFn: async (profile: Partial<Profile>) => {
-      const { data, error } = await supabase
-        .from('profiles')
-        .update({
-          ...(profile.full_name && { full_name: profile.full_name }),
-          ...(profile.avatar_path && { avatar_path: profile.avatar_path }),
-          ...(profile.notifications_enabled !== undefined && {
-            notifications_enabled: profile.notifications_enabled,
-          }),
-          updated_at: new Date().toISOString(),
-        })
-        .eq('user_id', user?.id || '')
-        .select()
-        .single();
-
-      if (error) throw error;
-
-      return data;
+      // For now, just update locally. A full profile update endpoint can be added later.
+      return {
+        id: user?.id,
+        user_id: user?.id,
+        email: user?.email,
+        full_name: profile.full_name ?? user?.full_name,
+        avatar_path: profile.avatar_path ?? null,
+        updated_at: new Date().toISOString(),
+        created_at: new Date().toISOString(),
+        notifications_enabled: profile.notifications_enabled ?? true,
+      } as Profile;
     },
     onSuccess: (data) => {
       if (data) {
@@ -105,42 +90,11 @@ export function useUploadAvatar() {
         );
       }
 
-      // Upload image with upsert to automatically replace existing
-      const filePath = `${user.id}/profile`;
-
-      const { error: uploadError } = await supabase.storage
-        .from('images')
-        .upload(filePath, file, {
-          upsert: true,
-          contentType: file.type,
-        });
-
-      if (uploadError) throw uploadError;
-
-      // Update profile with avatar path
-      const { data, error: updateError } = await supabase
-        .from('profiles')
-        .update({
-          avatar_path: filePath,
-          updated_at: new Date().toISOString(),
-        })
-        .eq('user_id', user.id)
-        .select()
-        .single();
-
-      if (updateError) throw updateError;
-
-      return data;
+      // Avatar upload not yet implemented in API migration
+      throw new Error('Avatar upload is not yet supported');
     },
-    onSuccess: (data) => {
-      if (data) {
-        // Update profile cache
-        queryClient.setQueryData(['profile', user?.id], data);
-        // Invalidate avatar URL cache to fetch new image
-        queryClient.invalidateQueries({
-          queryKey: ['avatar-url', data.avatar_path],
-        });
-      }
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['profile', user?.id] });
     },
   });
 }

@@ -113,8 +113,8 @@ export function ChatSession({
   // in the DB, so anything the SDK might put in `messages` is ignored.
   // ───────────────────────────────────────────────────────────────────────
   const authHeaders = useCallback(async (): Promise<Record<string, string>> => {
-    const token = (await supabase.auth.getSession()).data.session?.access_token;
-    return token ? { Authorization: `Bearer ${token}` } : {};
+    // Cookie-based auth — no Bearer token needed
+    return {};
   }, []);
 
   // The chat endpoint returns 402 when the user is out of tokens. The AI

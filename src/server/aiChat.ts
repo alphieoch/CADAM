@@ -1,4 +1,5 @@
 import { createAnthropic } from '@ai-sdk/anthropic';
+import { createAzure } from '@ai-sdk/azure';
 import { createGoogleGenerativeAI } from '@ai-sdk/google';
 import { createOpenRouter } from '@openrouter/ai-sdk-provider';
 import { chatTools, type AppUIMessage, type AppTools } from '@shared/chatAi';
@@ -21,12 +22,14 @@ import {
 } from 'ai';
 import type { ProviderOptions } from '@ai-sdk/provider-utils';
 import { z } from 'zod';
-import { billing, BillingClientError } from './billingClient';
+import { billing, BillingClientError } from './stripeBilling';
 import { corsHeaders, isRecord } from './api';
 import { env, requiredEnv } from './env';
 import { logError } from './serverLog';
 import { handleMeshRequest } from './mesh';
-import { getAnonSupabaseClient } from './supabaseClient';
+import { getUserFromRequest } from './auth';
+import { query } from './dbClient';
+import { downloadBlob } from './storageClient';
 
 /**
  * USD list price per **million** tokens, keyed by the same model IDs the
@@ -65,6 +68,13 @@ const MODEL_PRICES: Record<
 
   // MoonshotAI
   'moonshotai/kimi-k2.6': { input: 0.6, output: 2.5 },
+
+  // DeepSeek V4
+  'deepseek/deepseek-v4-flash': { input: 0.19, output: 0.51 },
+  'deepseek/deepseek-v4-pro': { input: 1.74, output: 3.48 },
+
+  // Azure OpenAI
+  'azure/gpt-4o': { input: 5, output: 15 },
 };
 
 const FALLBACK_MODEL_PRICE = { input: 15, output: 75 };
@@ -265,45 +275,69 @@ function jsonResponse(body: unknown, status: number) {
 
 const THINKING_BUDGET_TOKENS = 9000;
 
-type ChatProvider = 'anthropic' | 'google' | 'openrouter';
+type ChatProvider = 'anthropic' | 'google' | 'openrouter' | 'azure';
 
 function providerFor(modelId: string): ChatProvider {
   if (modelId.startsWith('anthropic/')) return 'anthropic';
   if (modelId.startsWith('google/')) return 'google';
+  if (modelId.startsWith('azure/')) return 'azure';
   return 'openrouter';
 }
 
 type AnthropicProvider = ReturnType<typeof createAnthropic>;
 type GoogleProvider = ReturnType<typeof createGoogleGenerativeAI>;
 
+type AzureProvider = ReturnType<typeof createAzure>;
 type ChatProviders = {
   anthropic: () => AnthropicProvider;
   google: () => GoogleProvider;
   openrouter: () => ReturnType<typeof createOpenRouter>;
+  azure: () => AzureProvider;
 };
 
 function createChatProviders(): ChatProviders {
   let anthropic: AnthropicProvider | undefined;
   let google: GoogleProvider | undefined;
   let openrouter: ReturnType<typeof createOpenRouter> | undefined;
+  let azure: AzureProvider | undefined;
   return {
     anthropic: () => {
-      anthropic ??= createAnthropic({
-        apiKey: requiredEnv('ANTHROPIC_API_KEY'),
-      });
+      const key = env('ANTHROPIC_API_KEY');
+      if (!key) throw new Error('ANTHROPIC_API_KEY is not set');
+      anthropic ??= createAnthropic({ apiKey: key });
       return anthropic;
     },
     google: () => {
-      google ??= createGoogleGenerativeAI({
-        apiKey: requiredEnv('GOOGLE_API_KEY'),
-      });
+      const key = env('GOOGLE_API_KEY');
+      if (!key) throw new Error('GOOGLE_API_KEY is not set');
+      google ??= createGoogleGenerativeAI({ apiKey: key });
       return google;
     },
     openrouter: () => {
-      openrouter ??= createOpenRouter({
-        apiKey: requiredEnv('OPENROUTER_API_KEY'),
-      });
+      const key = env('OPENROUTER_API_KEY');
+      if (!key) throw new Error('OPENROUTER_API_KEY is not set');
+      openrouter ??= createOpenRouter({ apiKey: key });
       return openrouter;
+    },
+    azure: () => {
+      const endpoint = env('AZURE_OPENAI_ENDPOINT');
+      const apiKey = env('AZURE_OPENAI_KEY');
+      const deployment = env('AZURE_OPENAI_DEPLOYMENT');
+      if (!endpoint || !apiKey) {
+        throw new Error('AZURE_OPENAI_ENDPOINT and AZURE_OPENAI_KEY are not set');
+      }
+      // Extract resource name from endpoint URL, e.g.
+      // https://alphonce-openai.openai.azure.com/ -> alphonce-openai
+      const resourceName = endpoint
+        .replace(/^https?:\/\//, '')
+        .replace(/\.openai\.azure\.com\/?.*$/, '');
+      azure ??= createAzure({
+        resourceName,
+        apiKey,
+        apiVersion: '2024-10-21',
+        useDeploymentBasedUrls: true,
+      });
+      return azure;
     },
   };
 }
@@ -359,6 +393,15 @@ function buildChatModel(
           },
         },
       },
+    };
+  }
+
+  if (modelId.startsWith('azure/')) {
+    // Azure OpenAI uses deployment names, not model IDs.
+    // The deployment name comes from the AZURE_OPENAI_DEPLOYMENT env var.
+    const deployment = env('AZURE_OPENAI_DEPLOYMENT') || 'gpt-4o';
+    return {
+      model: providers.azure().chat(deployment),
     };
   }
 
@@ -425,7 +468,7 @@ function billingTokensFromUsage(
   return Math.max(1, Math.ceil(usdCost / USD_PER_BILLING_TOKEN));
 }
 
-type SupabaseAnon = ReturnType<typeof getAnonSupabaseClient>;
+
 
 type BranchMessageRow = Pick<
   Message,
@@ -482,21 +525,21 @@ function messageRowToUIMessage(row: BranchMessageRow): AppUIMessage {
  * the server (mirrors the same defense in shared/Tree.ts on the client).
  */
 async function loadBranchFromDb({
-  supabaseClient,
   conversationId,
   leafId,
 }: {
-  supabaseClient: SupabaseAnon;
   conversationId: string;
   leafId: string;
 }): Promise<{ branch: AppUIMessage[]; leafRole: 'user' | 'assistant' }> {
-  const { data: rows, error } = await supabaseClient
-    .from('messages')
-    .select('id, role, parts, metadata, parent_message_id')
-    .eq('conversation_id', conversationId)
-    .overrideTypes<BranchMessageRow[]>();
+  const result = await query<BranchMessageRow>(
+    `SELECT id, role, parts, metadata, parent_message_id
+     FROM messages
+     WHERE conversation_id = $1`,
+    [conversationId],
+  );
+  const rows = result.rows;
 
-  if (error || !rows) {
+  if (!rows) {
     throw new Error('Failed to load conversation messages');
   }
 
@@ -634,7 +677,7 @@ function creativeTools({
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
-              Authorization: req.headers.get('Authorization') ?? '',
+              'Cookie': req.headers.get('Cookie') ?? '',
             },
             body: JSON.stringify({
               conversationId: conversation.id,
@@ -668,31 +711,25 @@ function creativeTools({
   };
 }
 
-async function downloadAsBase64(
-  supabaseClient: SupabaseAnon,
-  bucket: string,
-  path: string,
-) {
-  const { data, error } = await supabaseClient.storage
-    .from(bucket)
-    .download(path);
-  if (error || !data) return null;
-
-  const bytes = new Uint8Array(await data.arrayBuffer());
-  let binary = '';
-  const chunkSize = 0x8000;
-  for (let index = 0; index < bytes.length; index += chunkSize) {
-    binary += String.fromCharCode(...bytes.slice(index, index + chunkSize));
+async function downloadAsBase64(bucket: string, path: string) {
+  try {
+    const buffer = await downloadBlob(bucket, path);
+    const bytes = new Uint8Array(buffer);
+    let binary = '';
+    const chunkSize = 0x8000;
+    for (let index = 0; index < bytes.length; index += chunkSize) {
+      binary += String.fromCharCode(...bytes.slice(index, index + chunkSize));
+    }
+    return btoa(binary);
+  } catch {
+    return null;
   }
-  return btoa(binary);
 }
 
 function parametricTools({
   previewPathForToolCall,
-  supabaseClient,
 }: {
   previewPathForToolCall: (toolCallId: string) => string;
-  supabaseClient: SupabaseAnon;
 }) {
   return {
     build_parametric_model: {
@@ -710,7 +747,6 @@ function parametricTools({
         // didn't land, `downloadAsBase64` returns null and we fall back
         // to text-only — never block the loop on a missing thumbnail.
         const base64 = await downloadAsBase64(
-          supabaseClient,
           'images',
           previewPathForToolCall(toolCallId),
         );
@@ -741,6 +777,10 @@ function parametricTools({
 
 function chatModel(conversation: ConversationAccess, model: Model) {
   if (conversation.type === 'creative') {
+    // Use Azure OpenAI if configured, otherwise fall back to Anthropic
+    if (env('AZURE_OPENAI_ENDPOINT') && env('AZURE_OPENAI_KEY')) {
+      return 'azure/gpt-4o';
+    }
     return 'anthropic/claude-sonnet-4.5';
   }
   return model;
@@ -761,15 +801,7 @@ export async function handleAiChatRequest(req: Request) {
     return jsonResponse({ error: 'Method not allowed' }, 405);
   }
 
-  const supabaseClient = getAnonSupabaseClient({
-    global: {
-      headers: { Authorization: req.headers.get('Authorization') ?? '' },
-    },
-  });
-  const {
-    data: { user },
-  } = await supabaseClient.auth.getUser();
-
+  const user = await getUserFromRequest(req);
   if (!user?.id || !user.email) {
     return jsonResponse({ error: 'Unauthorized' }, 401);
   }
@@ -779,15 +811,16 @@ export async function handleAiChatRequest(req: Request) {
     return jsonResponse({ error: 'Invalid request body' }, 400);
   }
 
-  const { data: conversation, error: conversationError } = await supabaseClient
-    .from('conversations')
-    .select('id, type, user_id, current_message_leaf_id')
-    .eq('id', rawBody.conversationId)
-    .eq('user_id', user.id)
-    .single()
-    .overrideTypes<ConversationAccess>();
+  const convResult = await query<ConversationAccess>(
+    `SELECT id, type, user_id, current_message_leaf_id
+     FROM conversations
+     WHERE id = $1 AND user_id = $2
+     LIMIT 1`,
+    [rawBody.conversationId, user.id],
+  );
+  const conversation = convResult.rows[0];
 
-  if (conversationError || !conversation) {
+  if (!conversation) {
     return jsonResponse({ error: 'Conversation not found' }, 404);
   }
 
@@ -831,7 +864,6 @@ export async function handleAiChatRequest(req: Request) {
     conversation.type === 'creative'
       ? creativeTools({ conversation, req, model: rawBody.model })
       : parametricTools({
-          supabaseClient,
           previewPathForToolCall: (toolCallId) =>
             `${user.id}/${conversation.id}/preview-${toolCallId}`,
         });
@@ -840,7 +872,6 @@ export async function handleAiChatRequest(req: Request) {
   let leafRole: 'user' | 'assistant';
   try {
     const branchResult = await loadBranchFromDb({
-      supabaseClient,
       conversationId: conversation.id,
       leafId: conversation.current_message_leaf_id,
     });
@@ -1039,7 +1070,6 @@ export async function handleAiChatRequest(req: Request) {
         void emitConversationTitle({
           writer,
           anthropic: providers.anthropic(),
-          supabaseClient,
           conversation,
           firstMessage: branchMessages[0],
         });
@@ -1106,22 +1136,35 @@ export async function handleAiChatRequest(req: Request) {
             // `public.messages` automatically advances
             // `current_message_leaf_id` to the new row, so we don't need a
             // separate conversations update.
-            const { error } = isContinuation
-              ? await supabaseClient
-                  .from('messages')
-                  .update(serializedMessage)
-                  .eq('id', responseMessage.id)
-                  .eq('conversation_id', conversation.id)
-              : await supabaseClient.from('messages').insert({
-                  id: responseMessage.id,
-                  conversation_id: conversation.id,
-                  role: responseMessage.role,
-                  ...serializedMessage,
-                  parent_message_id: leafMessageId,
-                });
-
-            if (error) {
-              logError(error, {
+            try {
+              if (isContinuation) {
+                await query(
+                  `UPDATE messages
+                   SET metadata = $1, parts = $2
+                   WHERE id = $3 AND conversation_id = $4`,
+                  [
+                    JSON.stringify(serializedMessage.metadata),
+                    JSON.stringify(serializedMessage.parts),
+                    responseMessage.id,
+                    conversation.id,
+                  ],
+                );
+              } else {
+                await query(
+                  `INSERT INTO messages (id, conversation_id, role, metadata, parts, parent_message_id)
+                   VALUES ($1, $2, $3, $4, $5, $6)`,
+                  [
+                    responseMessage.id,
+                    conversation.id,
+                    responseMessage.role,
+                    JSON.stringify(serializedMessage.metadata),
+                    JSON.stringify(serializedMessage.parts),
+                    leafMessageId,
+                  ],
+                );
+              }
+            } catch (dbError) {
+              logError(dbError, {
                 functionName: 'ai-chat',
                 statusCode: 500,
                 userId: user.id,
@@ -1156,7 +1199,6 @@ export async function handleAiChatRequest(req: Request) {
               await emitConversationSuggestions({
                 writer,
                 anthropic: providers.anthropic(),
-                supabaseClient,
                 conversation,
                 branch: [
                   ...branchMessages,
@@ -1188,22 +1230,20 @@ export async function handleAiChatRequest(req: Request) {
 async function emitConversationTitle({
   writer,
   anthropic,
-  supabaseClient,
   conversation,
   firstMessage,
 }: {
   writer: UIMessageStreamWriter<AppUIMessage>;
   anthropic: AnthropicProvider;
-  supabaseClient: SupabaseAnon;
   conversation: ConversationAccess;
   firstMessage: AppUIMessage;
 }) {
   try {
     const title = await generateConversationTitle({ anthropic, firstMessage });
-    await supabaseClient
-      .from('conversations')
-      .update({ title })
-      .eq('id', conversation.id);
+    await query(
+      `UPDATE conversations SET title = $1 WHERE id = $2`,
+      [title, conversation.id],
+    );
     writer.write({
       transient: true,
       type: 'data-title-update',
@@ -1230,13 +1270,11 @@ async function emitConversationTitle({
 async function emitConversationSuggestions({
   writer,
   anthropic,
-  supabaseClient,
   conversation,
   branch,
 }: {
   writer: UIMessageStreamWriter<AppUIMessage>;
   anthropic: AnthropicProvider;
-  supabaseClient: SupabaseAnon;
   conversation: ConversationAccess;
   branch: AppUIMessage[];
 }) {
@@ -1250,21 +1288,21 @@ async function emitConversationSuggestions({
 
     // Merge into existing settings (which holds `model`, etc.) instead of
     // clobbering — keep the row's other fields intact.
-    const { data: convRow } = await supabaseClient
-      .from('conversations')
-      .select('settings')
-      .eq('id', conversation.id)
-      .single();
+    const convResult = await query(
+      `SELECT settings FROM conversations WHERE id = $1 LIMIT 1`,
+      [conversation.id],
+    );
+    const convRow = convResult.rows[0];
     const currentSettings =
       convRow?.settings &&
       typeof convRow.settings === 'object' &&
       !Array.isArray(convRow.settings)
         ? (convRow.settings as Record<string, unknown>)
         : {};
-    await supabaseClient
-      .from('conversations')
-      .update({ settings: { ...currentSettings, suggestions } })
-      .eq('id', conversation.id);
+    await query(
+      `UPDATE conversations SET settings = $1 WHERE id = $2`,
+      [JSON.stringify({ ...currentSettings, suggestions }), conversation.id],
+    );
 
     writer.write({
       transient: true,

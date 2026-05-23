@@ -1,5 +1,4 @@
 import { createContext, useContext } from 'react';
-import { Session, User } from '@supabase/supabase-js';
 
 export type SubscriptionLevel = 'standard' | 'pro' | 'max';
 export type PlanLevel = SubscriptionLevel | 'free';
@@ -21,6 +20,15 @@ export type BillingStatus = {
   };
 };
 
+// Azure-native user type (replaces Supabase User)
+export interface AuthUser {
+  id: string;
+  email: string;
+  full_name: string | null;
+  avatar_url: string | null;
+  provider: string;
+}
+
 const ACTIVE_STATUSES = new Set(['active', 'trialing']);
 
 export function getLevel(billing: BillingStatus | null | undefined): PlanLevel {
@@ -30,14 +38,15 @@ export function getLevel(billing: BillingStatus | null | undefined): PlanLevel {
 }
 
 interface AuthContextType {
-  session: Session | null;
-  user: User | null;
+  user: AuthUser | null;
   billing: BillingStatus | null;
   isLoading: boolean;
   signIn: (email: string, password: string) => Promise<void>;
   signUp: (email: string, password: string, name: string) => Promise<void>;
   signOut: () => Promise<void>;
   signInWithMagicLink: (email: string) => Promise<void>;
+  signInWithMicrosoft: () => Promise<void>;
+  signInWithGoogle: () => Promise<void>;
   verifyOtp: (email: string, token: string) => Promise<void>;
   resetPassword: (email: string) => Promise<void>;
   updatePassword: (password: string) => Promise<void>;

@@ -1,5 +1,4 @@
 import { useConversation } from '@/contexts/ConversationContext';
-import { supabase } from '@/lib/supabase';
 import type { AppUIMessage } from '@shared/chatAi';
 import type { Conversation, Message } from '@shared/types';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
@@ -28,15 +27,25 @@ export async function persistUserMessage({
   parentMessageId: string | null;
 }): Promise<string> {
   const id = crypto.randomUUID();
-  const { error } = await supabase.from('messages').insert({
-    id,
-    conversation_id: conversationId,
-    role: 'user',
-    parts: JSON.parse(JSON.stringify(parts)),
-    metadata: JSON.parse(JSON.stringify(metadata ?? {})),
-    parent_message_id: parentMessageId,
-  });
-  if (error) throw error;
+  const res = await fetch(
+    `${import.meta.env.BASE_URL}/api/conversations/${conversationId}/messages`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({
+        id,
+        role: 'user',
+        parts,
+        metadata: metadata ?? {},
+        parent_message_id: parentMessageId,
+      }),
+    },
+  );
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: 'Failed to persist message' }));
+    throw new Error(err.error || 'Failed to persist message');
+  }
   return id;
 }
 
@@ -47,7 +56,6 @@ export async function persistUserMessage({
  * the leaf and continues the stream.
  */
 export async function persistAssistantParts({
-  conversationId,
   messageId,
   parts,
 }: {
@@ -55,12 +63,19 @@ export async function persistAssistantParts({
   messageId: string;
   parts: AppUIMessage['parts'];
 }) {
-  const { error } = await supabase
-    .from('messages')
-    .update({ parts: JSON.parse(JSON.stringify(parts)) })
-    .eq('id', messageId)
-    .eq('conversation_id', conversationId);
-  if (error) throw error;
+  const res = await fetch(
+    `${import.meta.env.BASE_URL}/api/messages/${messageId}`,
+    {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ parts }),
+    },
+  );
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: 'Failed to update message' }));
+    throw new Error(err.error || 'Failed to update message');
+  }
 }
 
 export const useMessagesQuery = () => {
@@ -71,15 +86,15 @@ export const useMessagesQuery = () => {
     queryKey: ['messages', conversation.id],
     initialData: [],
     queryFn: async () => {
-      const { data, error } = await supabase
-        .from('messages')
-        .select('*')
-        .eq('conversation_id', conversation.id)
-        .order('created_at', { ascending: true })
-        .overrideTypes<Message[]>();
-
-      if (error) throw error;
-      return data ?? [];
+      const res = await fetch(
+        `${import.meta.env.BASE_URL}/api/conversations/${conversation.id}/messages`,
+        { credentials: 'include' },
+      );
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: 'Failed to load messages' }));
+        throw new Error(err.error || 'Failed to load messages');
+      }
+      return (await res.json()) as Message[];
     },
   });
 };
@@ -109,11 +124,19 @@ export function useChangeRatingMutation({
         (oldMessages) =>
           oldMessages?.map((m) => (m.id === messageId ? { ...m, rating } : m)),
       );
-      const { error } = await supabase
-        .from('messages')
-        .update({ rating })
-        .eq('id', messageId);
-      if (error) throw error;
+      const res = await fetch(
+        `${import.meta.env.BASE_URL}/api/messages/${messageId}`,
+        {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
+          body: JSON.stringify({ rating }),
+        },
+      );
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: 'Failed to update rating' }));
+        throw new Error(err.error || 'Failed to update rating');
+      }
     },
   });
 }
@@ -150,16 +173,26 @@ export function useRestoreMessageMutation({
       >;
     }) => {
       const newId = crypto.randomUUID();
-      const { error } = await supabase.from('messages').insert({
-        id: newId,
-        conversation_id: conversation.id,
-        role: message.role,
-        parts: JSON.parse(JSON.stringify(message.parts)),
-        metadata: JSON.parse(JSON.stringify(message.metadata ?? {})),
-        parent_message_id: message.parent_message_id,
-        rating: 0,
-      });
-      if (error) throw error;
+      const res = await fetch(
+        `${import.meta.env.BASE_URL}/api/conversations/${conversation.id}/messages`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
+          body: JSON.stringify({
+            id: newId,
+            role: message.role,
+            parts: message.parts,
+            metadata: message.metadata ?? {},
+            parent_message_id: message.parent_message_id,
+            rating: 0,
+          }),
+        },
+      );
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: 'Failed to restore message' }));
+        throw new Error(err.error || 'Failed to restore message');
+      }
 
       if (updateConversationAsync) {
         await updateConversationAsync({

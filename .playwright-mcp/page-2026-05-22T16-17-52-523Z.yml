@@ -1,0 +1,125 @@
+- generic [active]:
+  - list
+  - generic:
+    - generic:
+      - generic:
+        - generic:
+          - button:
+            - generic:
+              - img
+        - generic:
+          - generic:
+            - generic:
+              - button:
+                - img
+                - generic: New Creation
+            - navigation:
+              - generic:
+                - button:
+                  - img
+                  - text: Creations
+          - generic:
+            - generic:
+              - link:
+                - /url: https://github.com/Adam-CAD/CADAM
+                - button:
+                  - img:
+                    - img
+                  - text: GitHub
+              - link:
+                - /url: https://discord.com/invite/HKdXDqAHCs
+                - button:
+                  - img:
+                    - img
+                  - text: Discord
+              - generic:
+                - generic:
+                  - generic: U
+                - generic:
+                  - generic: speedtarget1
+                  - generic: speedtarget1@gmail.com
+      - generic:
+        - generic:
+          - generic:
+            - button:
+              - img
+              - generic: "0"
+        - button:
+          - img
+        - generic:
+          - generic:
+            - generic:
+              - main:
+                - generic:
+                  - heading [level=1]: Good afternoon!
+                - generic:
+                  - generic:
+                    - generic:
+                      - generic:
+                        - generic:
+                          - generic:
+                            - generic:
+                              - img
+                          - generic:
+                            - textbox [disabled]:
+                              - /placeholder: Start building with Adam...
+                          - button [disabled]:
+                            - img
+                        - generic:
+                          - generic:
+                            - generic [ref=e1]:
+                              - button [disabled]:
+                                - img
+                            - button:
+                              - img
+                              - generic: Mesh
+                          - generic:
+                            - button [disabled]:
+                              - generic:
+                                - generic: Gemini 3.1 Pro
+                              - img
+                            - button [disabled]:
+                              - img
+                    - generic:
+                      - generic:
+                        - generic: You've used all your tokens. Start a trial to experience all Pro features for 7 days, completely free.
+  - dialog "Here's 7 days of Adam Pro" [ref=e3]:
+    - heading "Here's 7 days of Adam Pro" [level=2] [ref=e5]
+    - paragraph [ref=e6]: Experience all Pro features for 7 days, completely free.
+    - generic [ref=e8]:
+      - button "Start your Free Trial" [disabled] [ref=e9]:
+        - img [ref=e12]
+        - generic [ref=e16]: Start your Free Trial
+      - generic [ref=e18]:
+        - img [ref=e19]
+        - img [ref=e21]
+        - img [ref=e23]
+        - img [ref=e25]
+        - img [ref=e27]
+        - img [ref=e29]
+        - img [ref=e31]
+        - img [ref=e33]
+        - img [ref=e35]
+        - img [ref=e37]
+        - img [ref=e39]
+        - img [ref=e41]
+        - img [ref=e43]
+        - img [ref=e45]
+        - img [ref=e47]
+    - list [ref=e49]:
+      - listitem [ref=e50]:
+        - img [ref=e51]
+        - generic [ref=e53]: 5,000 tokens per month
+      - listitem [ref=e54]:
+        - img [ref=e55]
+        - generic [ref=e57]: Phone number of founders
+      - listitem [ref=e58]:
+        - img [ref=e59]
+        - generic [ref=e61]: Exclusive access to new features
+      - listitem [ref=e62]:
+        - img [ref=e63]
+        - generic [ref=e65]: Good vibes
+    - paragraph [ref=e66]: Cancel anytime
+    - button "Close" [ref=e67] [cursor=pointer]:
+      - img [ref=e68]
+      - generic [ref=e70]: Close

@@ -486,7 +486,7 @@ function TextAreaChat({
     useState('');
   const prevIsDraggingRef = useRef(isDragging);
   const { toast } = useToast();
-  const { session } = useAuth();
+  const { user } = useAuth();
   const { images, mesh, setImages, setMesh } = useItemSelection();
   const meshFiles = useMeshFiles();
   const creativeModel =
@@ -851,7 +851,7 @@ function TextAreaChat({
       const preview = await generatePreview(file, fileExtension);
 
       // Only upload if the current user is the conversation owner
-      if (session?.user.id === conversation.user_id) {
+      if (user?.id === conversation.user_id) {
         // Convert data URL to Blob
         const response = await fetch(preview);
         const blob = await response.blob();
@@ -1133,12 +1133,12 @@ function TextAreaChat({
           supabase.storage
             .from('meshes')
             .remove([
-              `${session?.user?.id}/${conversation.id}/${mesh.id}.${fileExtension}`,
+              `${user?.id}/${conversation.id}/${mesh.id}.${fileExtension}`,
             ]),
           supabase.storage
             .from('images')
             .remove([
-              `${session?.user?.id}/${conversation.id}/preview-${mesh.id}`,
+              `${user?.id}/${conversation.id}/preview-${mesh.id}`,
             ]),
         ]);
       } catch (error) {
@@ -1155,7 +1155,7 @@ function TextAreaChat({
         try {
           await supabase.storage
             .from('images')
-            .remove([`${session?.user?.id}/${conversation.id}/${image.id}`]);
+            .remove([`${user?.id}/${conversation.id}/${image.id}`]);
         } catch (error) {
           console.error('Error removing image:', error);
         }

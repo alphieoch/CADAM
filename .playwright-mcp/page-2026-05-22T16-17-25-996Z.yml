@@ -1,0 +1,32 @@
+- generic [active] [ref=e1]:
+  - region "Notifications (F8)":
+    - list
+  - generic [ref=e4]:
+    - img "Adam Logo" [ref=e7]
+    - generic [ref=e8]:
+      - button "Continue with Google" [ref=e9] [cursor=pointer]:
+        - img [ref=e10]:
+          - img "Google" [ref=e11]
+        - generic [ref=e13]: Continue with Google
+      - button "Continue with Microsoft" [ref=e14] [cursor=pointer]:
+        - img [ref=e15]:
+          - img "Microsoft" [ref=e16]
+        - generic [ref=e18]: Continue with Microsoft
+    - generic [ref=e19]:
+      - generic [ref=e20]:
+        - text: Email
+        - textbox "Email" [ref=e21]:
+          - /placeholder: Enter your email
+      - generic [ref=e22]:
+        - generic [ref=e23]:
+          - generic [ref=e24]: Password
+          - link "Forgot password?" [ref=e25] [cursor=pointer]:
+            - /url: /cadam/reset-password
+        - textbox "Password" [ref=e26]:
+          - /placeholder: Enter your password
+      - button "Sign in with magic link instead" [ref=e28] [cursor=pointer]
+      - button "Sign In" [ref=e29] [cursor=pointer]
+      - generic [ref=e30]:
+        - text: Don't have an account?
+        - link "Sign up" [ref=e31] [cursor=pointer]:
+          - /url: /cadam/signup

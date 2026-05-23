@@ -1,0 +1,69 @@
+- generic [ref=e1]:
+  - region "Notifications (F8)":
+    - list
+  - generic [ref=e33]:
+    - generic [ref=e34]:
+      - button "Logo" [ref=e146] [cursor=pointer]:
+        - img "Logo" [ref=e147]
+      - generic [ref=e39]:
+        - generic [ref=e40]:
+          - button [ref=e149] [cursor=pointer]:
+            - img [ref=e150]
+          - navigation [ref=e45]:
+            - button [ref=e151] [cursor=pointer]:
+              - img [ref=e152]
+        - generic [ref=e54]:
+          - link [ref=e157] [cursor=pointer]:
+            - /url: https://github.com/Adam-CAD/CADAM
+            - button [ref=e158]:
+              - img [ref=e159]:
+                - img "GitHub" [ref=e160]
+          - link [ref=e162] [cursor=pointer]:
+            - /url: https://discord.com/invite/HKdXDqAHCs
+            - button [ref=e163]:
+              - img [ref=e164]:
+                - img "Discord" [ref=e165]
+          - button "U" [ref=e167] [cursor=pointer]:
+            - generic [ref=e169]: U
+    - generic [ref=e71]:
+      - button "View credits" [ref=e74] [cursor=pointer]:
+        - img [ref=e75]
+        - generic [ref=e77]: 5.0K
+      - button [active] [ref=e78] [cursor=pointer]:
+        - img [ref=e79]
+      - main [ref=e84]:
+        - heading "Good evening!" [level=1] [ref=e170]
+        - generic [ref=e88]:
+          - generic [ref=e89]:
+            - generic [ref=e90]:
+              - generic:
+                - img
+                - paragraph: Drop images and 3D models here
+            - generic [ref=e91]:
+              - generic [ref=e92]:
+                - img "Adam Logo" [ref=e95]
+                - textbox "Start building with Adam..." [ref=e97]
+                - button [ref=e98] [cursor=pointer]:
+                  - img [ref=e99]
+              - generic [ref=e102]:
+                - generic [ref=e103]:
+                  - button [ref=e105] [cursor=pointer]:
+                    - img [ref=e106]
+                  - button "Mesh" [ref=e110] [cursor=pointer]:
+                    - img [ref=e111]
+                    - generic [ref=e114]: Mesh
+                - generic [ref=e115]:
+                  - button "Gemini 3.1 Pro" [ref=e116] [cursor=pointer]:
+                    - generic [ref=e118]: Gemini 3.1 Pro
+                    - img [ref=e119]
+                  - button [disabled] [ref=e121]:
+                    - img [ref=e122]
+          - generic [ref=e124]:
+            - link "Try our Onshape extension" [ref=e125] [cursor=pointer]:
+              - /url: https://cad.onshape.com/appstore/apps/Design%20&%20Documentation/690a8dc864e816c112aa66a0
+              - generic [ref=e126]: Try our Onshape extension
+              - img [ref=e127]
+            - link "Try our Fusion extension" [ref=e130] [cursor=pointer]:
+              - /url: https://fusion.adam.new/install
+              - generic [ref=e131]: Try our Fusion extension
+              - img [ref=e132]

@@ -3,7 +3,6 @@ import { ArrowUpRight, LogIn } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { useToast } from '@/hooks/use-toast';
 import { useAuth } from '@/contexts/AuthContext';
-import { supabase } from '@/lib/supabase';
 import TextAreaChat from '@/components/TextAreaChat';
 import { useQueryClient, useMutation } from '@tanstack/react-query';
 import { useState, useMemo, useEffect } from 'react';
@@ -59,7 +58,7 @@ export function PromptView() {
     return source.trim().split(/\s+/)[0] || '';
   }, [profile?.full_name, user, isProfileLoading]);
 
-  const [type, setType] = useState<'parametric' | 'creative'>('parametric');
+  const [type, setType] = useState<'parametric' | 'creative'>('creative');
 
   const [model, setModel] = useState<Model>('google/gemini-3.1-pro-preview');
 
@@ -139,28 +138,26 @@ export function PromptView() {
       });
 
       // Create conversation immediately with 'New Conversation'
-      const { data: conversation, error: conversationError } = await supabase
-        .from('conversations')
-        .insert([
-          {
-            id: conversationId,
-            user_id: user.id,
-            title: 'New Conversation',
-            type: type,
-            settings: {
-              model: model,
-            },
-          },
-        ])
-        .select()
-        .single();
-
-      if (conversationError) throw conversationError;
+      const convRes = await fetch(`${import.meta.env.BASE_URL}/api/conversations`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({
+          id: conversationId,
+          title: 'New Conversation',
+          type: type,
+          settings: { model },
+        }),
+      });
+      if (!convRes.ok) {
+        const err = await convRes.json().catch(() => ({ error: 'Failed to create conversation' }));
+        throw new Error(err.error || 'Failed to create conversation');
+      }
+      const conversation = await convRes.json();
 
       await ensureInputRecords({
         parts,
         conversationId: conversation.id,
-        userId: user.id,
       });
       if (parts.length === 0) throw new Error('No message parts to send');
 
@@ -185,11 +182,8 @@ export function PromptView() {
             type === 'creative' ? 'creative-chat' : 'parametric-chat',
           ),
           headers: async (): Promise<Record<string, string>> => {
-            const accessToken = (await supabase.auth.getSession()).data.session
-              ?.access_token;
-            const headers: Record<string, string> = {};
-            if (accessToken) headers.Authorization = `Bearer ${accessToken}`;
-            return headers;
+            // Cookie-based auth — no Bearer token needed
+            return {};
           },
           prepareSendMessagesRequest: ({ body }) => ({
             body: {

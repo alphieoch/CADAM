@@ -7,7 +7,7 @@ import { ScrollArea } from '@/components/ui/scroll-area';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Input } from '@/components/ui/input';
-import { supabase } from '@/lib/supabase';
+import { apiJson } from '@/services/api';
 import { useAuth } from '@/contexts/AuthContext';
 import { format } from 'date-fns';
 import { useToast } from '@/hooks/use-toast';
@@ -60,36 +60,18 @@ export function HistoryView() {
     queryKey: ['conversations'],
     enabled: !!user,
     queryFn: async () => {
-      const { data: conversationsData, error: conversationsError } =
-        await supabase
-          .from('conversations')
-          .select(
-            `*, first_message:messages(parts), messagesCount:messages(count)`,
-          )
-          .eq('user_id', user?.id ?? '')
-          .order('updated_at', { ascending: false })
-          .order('created_at', { ascending: false })
-          .limit(1, { referencedTable: 'first_message' })
-          .overrideTypes<Array<{ settings: ConversationSettings }>>();
+      const conversationsData = (await apiJson('conversations', {
+        method: 'GET',
+      })) as Conversation[];
 
-      if (conversationsError) throw conversationsError;
-
-      const formattedConversations = conversationsData.map((conv) => {
-        const parts = conv.first_message?.[0]?.parts;
-        const messageCount = conv.messagesCount?.[0]?.count ?? 0;
-
-        const formattedFirstMessage = {
-          text: textFromParts(parts),
-          images: imageIdsFromParts(parts),
-        };
-
+      const formattedConversations = (conversationsData || []).map((conv) => {
         return {
           ...conv,
           created_at: conv.created_at || new Date().toISOString(),
           updated_at:
             conv.updated_at || conv.created_at || new Date().toISOString(),
-          message_count: messageCount,
-          first_message: formattedFirstMessage,
+          message_count: 0,
+          first_message: { text: '', images: [] },
         };
       });
 
@@ -109,24 +91,14 @@ export function HistoryView() {
 
   const deleteConversation = useMutation({
     mutationFn: async (conversationId: string) => {
-      const { error } = await supabase
-        .from('conversations')
-        .delete()
-        .eq('id', conversationId);
-
-      if (error) throw error;
-
-      supabase.storage
-        .from('images')
-        .list(`${user?.id}/${conversationId}`)
-        .then(({ data: list }) => {
-          if (list) {
-            const filesToRemove = list.map(
-              (file) => `${user?.id}/${conversationId}/${file.name}`,
-            );
-            supabase.storage.from('images').remove(filesToRemove);
-          }
-        });
+      const res = await fetch(
+        `${import.meta.env.BASE_URL}/api/conversations/${conversationId}`,
+        { method: 'DELETE', credentials: 'include' },
+      );
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.error || res.statusText);
+      }
     },
     onMutate: async (conversationId) => {
       await queryClient.cancelQueries({ queryKey: ['conversations'] });
@@ -167,12 +139,16 @@ export function HistoryView() {
       conversationId: string;
       newTitle: string;
     }) => {
-      const { error } = await supabase
-        .from('conversations')
-        .update({ title: newTitle })
-        .eq('id', conversationId);
-
-      if (error) throw error;
+      const res = await fetch(
+        `${import.meta.env.BASE_URL}/api/conversations/${conversationId}`,
+        {
+          method: 'PATCH',
+          credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ title: newTitle }),
+        },
+      );
+      if (!res.ok) throw new Error('Failed to rename conversation');
     },
     onMutate: async ({ conversationId, newTitle }) => {
       await queryClient.cancelQueries({ queryKey: ['conversations'] });
@@ -217,12 +193,16 @@ export function HistoryView() {
       conversationId: string;
       newPrivacy: 'public' | 'private';
     }) => {
-      const { error } = await supabase
-        .from('conversations')
-        .update({ privacy: newPrivacy })
-        .eq('id', conversationId);
-
-      if (error) throw error;
+      const res = await fetch(
+        `${import.meta.env.BASE_URL}/api/conversations/${conversationId}`,
+        {
+          method: 'PATCH',
+          credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ privacy: newPrivacy }),
+        },
+      );
+      if (!res.ok) throw new Error('Failed to update privacy');
     },
     onMutate: async ({ conversationId, newPrivacy }) => {
       await queryClient.cancelQueries({ queryKey: ['conversations'] });

@@ -2,9 +2,9 @@ import { Link, useNavigate, useLocation } from '@tanstack/react-router';
 import { Button } from '@/components/ui/button';
 import { useToast } from '@/hooks/use-toast';
 import { useAuth } from '@/contexts/AuthContext';
-import { supabase } from '@/lib/supabase';
+
 import { useMutation } from '@tanstack/react-query';
-import { GoogleIcon } from '@/components/icons/CompanyIcons';
+import { GoogleIcon, MicrosoftIcon } from '@/components/icons/CompanyIcons';
 import { useEffect } from 'react';
 import { validateRedirectUrl } from '@/lib/utils';
 
@@ -18,7 +18,7 @@ export function SignUpView() {
   const { toast } = useToast();
   const navigate = useNavigate();
   const location = useLocation();
-  const { session, user, isLoading: authLoading } = useAuth();
+  const { signInWithGoogle, signInWithMicrosoft, user, isLoading: authLoading } = useAuth();
 
   // Get and validate redirect parameter from URL
   const searchParams = new URLSearchParams(location.searchStr);
@@ -27,26 +27,30 @@ export function SignUpView() {
 
   // Redirect to home if already authenticated
   useEffect(() => {
-    if (!authLoading && session && user) {
+    if (!authLoading && user) {
       navigate({ to: '/', replace: true });
     }
-  }, [session, user, authLoading, navigate]);
+  }, [user, authLoading, navigate]);
 
-  const { mutate: signInWithGoogle, isPending: isSigningInWithGoogle } =
+  const { mutate: handleSignInWithGoogle, isPending: isSigningInWithGoogle } =
     useMutation({
       mutationFn: async () => {
-        // Use Supabase's built-in redirectTo parameter with validated URL
-        const redirectTo =
-          redirectPath !== '/'
-            ? getAppRedirectUrl(redirectPath)
-            : getAppRedirectUrl('/');
-
-        await supabase.auth.signInWithOAuth({
-          provider: 'google',
-          options: {
-            redirectTo,
-          },
+        await signInWithGoogle();
+      },
+      onError: (error) => {
+        toast({
+          title: 'Whoopsies',
+          description:
+            error instanceof Error ? error.message : 'Something went wrong',
+          variant: 'destructive',
         });
+      },
+    });
+
+  const { mutate: handleSignInWithMicrosoft, isPending: isSigningInWithMicrosoft } =
+    useMutation({
+      mutationFn: async () => {
+        await signInWithMicrosoft();
       },
       onError: (error) => {
         toast({
@@ -70,14 +74,22 @@ export function SignUpView() {
             />
             <h1 className="text-xl font-semibold text-white">Create Account</h1>
           </div>
-          <div className="w-full py-2">
+          <div className="flex flex-col gap-2 py-2">
             <Button
-              onClick={() => signInWithGoogle()}
+              onClick={() => handleSignInWithGoogle()}
               className="flex w-full items-center gap-2 p-6 md:hover:bg-adam-blue/10"
               disabled={isSigningInWithGoogle}
             >
               <GoogleIcon className="w-4" />
               <span>Continue with Google</span>
+            </Button>
+            <Button
+              onClick={() => handleSignInWithMicrosoft()}
+              className="flex w-full items-center gap-2 bg-[#0078D4] p-6 text-white hover:bg-[#005A9E]"
+              disabled={isSigningInWithMicrosoft}
+            >
+              <MicrosoftIcon className="w-4" />
+              <span>Continue with Microsoft</span>
             </Button>
           </div>
           <div className="pt-4 text-center text-sm text-adam-text-secondary">

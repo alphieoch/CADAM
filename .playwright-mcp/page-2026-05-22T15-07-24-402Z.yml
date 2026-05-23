@@ -1,0 +1,40 @@
+- generic [active] [ref=e1]:
+  - region "Notifications (F8)":
+    - list
+  - generic [ref=e4]:
+    - generic [ref=e5]:
+      - button "Sign Up" [ref=e6] [cursor=pointer]
+      - button "Sign In" [ref=e7] [cursor=pointer]:
+        - img [ref=e8]
+        - text: Sign In
+    - main [ref=e11]:
+      - heading "Good afternoon!" [level=1] [ref=e13]
+      - generic [ref=e15]:
+        - generic [ref=e18]:
+          - generic [ref=e19]:
+            - img "Adam Logo" [ref=e22]
+            - textbox [disabled] [ref=e24]
+            - button [disabled]:
+              - img
+          - generic [ref=e25]:
+            - generic [ref=e26]:
+              - generic [ref=e27]:
+                - button [disabled]:
+                  - img
+              - button "Mesh" [ref=e28] [cursor=pointer]:
+                - img [ref=e29]
+                - generic [ref=e32]: Mesh
+            - generic [ref=e33]:
+              - button "Gemini 3.1 Pro" [disabled]:
+                - generic:
+                  - generic: Gemini 3.1 Pro
+                - img
+              - button [disabled] [ref=e34]:
+                - img [ref=e35]
+        - paragraph [ref=e37]:
+          - link "Sign in" [ref=e38] [cursor=pointer]:
+            - /url: /cadam/signin
+          - text: or
+          - link "create an account" [ref=e39] [cursor=pointer]:
+            - /url: /cadam/signup
+          - text: to start generating

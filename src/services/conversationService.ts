@@ -1,6 +1,5 @@
 import { useAuth } from '@/contexts/AuthContext';
 import { Conversation } from '@shared/types';
-import { supabase } from '@/lib/supabase';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useParams } from '@tanstack/react-router';
 
@@ -36,37 +35,39 @@ export function useConversation() {
           throw new Error('User must be authenticated');
         }
 
-        const { data, error } = await supabase
-          .from('conversations')
-          .select('*')
-          .eq('id', conversationId)
-          .eq('user_id', user.id)
-          .limit(1)
-          .single()
-          .overrideTypes<Conversation>();
-
-        if (error) {
-          throw error;
+        const res = await fetch(
+          `${import.meta.env.BASE_URL}/api/conversations/${conversationId}`,
+          { credentials: 'include' },
+        );
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({ error: 'Failed to load conversation' }));
+          throw new Error(err.error || 'Failed to load conversation');
         }
-        return data as Conversation;
+        return (await res.json()) as Conversation;
       },
     });
 
   const { mutate: updateConversation, mutateAsync: updateConversationAsync } =
     useMutation({
       mutationFn: async (conversation: Conversation) => {
-        const { data, error } = await supabase
-          .from('conversations')
-          .update(conversation)
-          .eq('id', conversation.id)
-          .select()
-          .single();
-
-        if (error) {
-          throw error;
+        const res = await fetch(
+          `${import.meta.env.BASE_URL}/api/conversations/${conversation.id}`,
+          {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
+            body: JSON.stringify({
+              title: conversation.title,
+              settings: conversation.settings,
+              current_message_leaf_id: conversation.current_message_leaf_id,
+            }),
+          },
+        );
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({ error: 'Failed to update conversation' }));
+          throw new Error(err.error || 'Failed to update conversation');
         }
-
-        return data;
+        return (await res.json()) as Conversation;
       },
       onMutate: async (conversation) => {
         // Cancel any outgoing refetches

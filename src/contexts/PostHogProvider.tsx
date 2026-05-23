@@ -25,8 +25,8 @@ export function PostHogProvider({ children }: PostHogProviderProps) {
 
     analytics.identify(user.id, {
       email: user.email,
-      created_at: user.created_at,
-      is_anonymous: user.is_anonymous,
+      full_name: user.full_name,
+      provider: user.provider,
     });
   }, [user]);
 

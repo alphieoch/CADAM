@@ -7,7 +7,7 @@ import {
   preflight,
   requireUser,
 } from '@/server/api';
-import { billing } from '@/server/billingClient';
+import { billing } from '@/server/stripeBilling';
 import { env } from '@/server/env';
 
 const appUrl = () => env('ADAM_URL') || 'https://adam.new/app';

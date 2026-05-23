@@ -1,5 +1,7 @@
-import type { User } from '@supabase/supabase-js';
-import { getAnonSupabaseClient } from './supabaseClient';
+import { requireUser as jwtRequireUser, type AuthUser } from './auth';
+
+export { jwtRequireUser as requireUser };
+export type { AuthUser };
 
 export const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -29,15 +31,4 @@ export function isUnauthorizedError(error: unknown) {
 
 export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
-}
-
-export async function requireUser(request: Request): Promise<User> {
-  const supabase = getAnonSupabaseClient({
-    global: {
-      headers: { Authorization: request.headers.get('Authorization') ?? '' },
-    },
-  });
-  const { data, error } = await supabase.auth.getUser();
-  if (error || !data.user?.email) throw new Error('Unauthorized');
-  return data.user;
 }

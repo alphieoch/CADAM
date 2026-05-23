@@ -90,9 +90,25 @@ function GoogleSvg() {
   );
 }
 
+function MicrosoftSvg() {
+  return (
+    <svg
+      fill="currentColor"
+      stroke="none"
+      role="img"
+      viewBox="0 0 24 24"
+      xmlns="http://www.w3.org/2000/svg"
+    >
+      <title>Microsoft</title>
+      <path d="M0 0h11.377v11.372H0zm12.623 0H24v11.372H12.623zM0 12.623h11.377V24H0zm12.623 0H24V24H12.623" />
+    </svg>
+  );
+}
+
 export const FacebookIcon = createLucideIcon('facebook', <FacebookSvg />);
 export const TwitterIcon = createLucideIcon('twitter', <TwitterSvg />);
 export const GitHubIcon = createLucideIcon('github', <GitHubSvg />);
 export const DiscordIcon = createLucideIcon('discord', <DiscordSvg />);
 export const GoogleIcon = createLucideIcon('google', <GoogleSvg />);
+export const MicrosoftIcon = createLucideIcon('microsoft', <MicrosoftSvg />);
 export const WhatsAppIcon = createLucideIcon('whatsapp', <WhatsAppSvg />);

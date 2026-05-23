@@ -1,0 +1,85 @@
+- generic [active] [ref=e1]:
+  - region "Notifications (F8)":
+    - list
+  - generic [ref=e5]:
+    - generic [ref=e6]:
+      - button "Logo" [ref=e8] [cursor=pointer]:
+        - img "Logo" [ref=e10]
+      - generic [ref=e11]:
+        - generic [ref=e12]:
+          - button "New Creation" [ref=e14] [cursor=pointer]:
+            - img [ref=e15]
+            - generic [ref=e16]: New Creation
+          - navigation [ref=e17]:
+            - generic [ref=e18]:
+              - button "Creations" [ref=e19] [cursor=pointer]:
+                - img [ref=e20]
+                - text: Creations
+              - list [ref=e25]:
+                - link "Test Parametric" [ref=e26] [cursor=pointer]:
+                  - /url: /cadam/editor/550e8400-e29b-41d4-a716-446655440100
+                  - listitem [ref=e27]:
+                    - generic [ref=e28]: Test Parametric
+                - link "Test Creative" [ref=e29] [cursor=pointer]:
+                  - /url: /cadam/editor/550e8400-e29b-41d4-a716-446655440001
+                  - listitem [ref=e30]:
+                    - generic [ref=e31]: Test Creative
+        - generic [ref=e33]:
+          - link "GitHub" [ref=e34] [cursor=pointer]:
+            - /url: https://github.com/Adam-CAD/CADAM
+            - button "GitHub" [ref=e35]:
+              - img [ref=e36]:
+                - img "GitHub" [ref=e37]
+              - text: GitHub
+          - link "Discord" [ref=e39] [cursor=pointer]:
+            - /url: https://discord.com/invite/HKdXDqAHCs
+            - button "Discord" [ref=e40]:
+              - img [ref=e41]:
+                - img "Discord" [ref=e42]
+              - text: Discord
+          - generic [ref=e44] [cursor=pointer]:
+            - generic [ref=e46]: AO
+            - generic [ref=e47]:
+              - generic [ref=e48]: Alphie Och
+              - generic [ref=e49]: speedtarget1@gmail.com
+    - generic [ref=e50]:
+      - button "View credits" [ref=e53] [cursor=pointer]:
+        - img [ref=e54]
+        - generic [ref=e56]: 5.0K
+      - button [ref=e57] [cursor=pointer]:
+        - img [ref=e58]
+      - main [ref=e63]:
+        - heading "Good morning, Alphie!" [level=1] [ref=e65]
+        - generic [ref=e67]:
+          - generic [ref=e68]:
+            - generic [ref=e69]:
+              - generic:
+                - img
+                - paragraph: Drop images and 3D models here
+            - generic [ref=e70]:
+              - generic [ref=e71]:
+                - img "Adam Logo" [ref=e74]
+                - textbox "Speak anything into existence..." [ref=e76]
+                - button [ref=e77] [cursor=pointer]:
+                  - img [ref=e78]
+              - generic [ref=e81]:
+                - generic [ref=e82]:
+                  - button [ref=e84] [cursor=pointer]:
+                    - img [ref=e85]
+                  - button "Mesh" [ref=e89] [cursor=pointer]:
+                    - img [ref=e90]
+                    - generic [ref=e93]: Mesh
+                - generic [ref=e94]:
+                  - button [ref=e95] [cursor=pointer]:
+                    - img [ref=e96]
+                  - button [disabled] [ref=e98]:
+                    - img [ref=e99]
+          - generic [ref=e101]:
+            - link "Try our Onshape extension" [ref=e102] [cursor=pointer]:
+              - /url: https://cad.onshape.com/appstore/apps/Design%20&%20Documentation/690a8dc864e816c112aa66a0
+              - generic [ref=e103]: Try our Onshape extension
+              - img [ref=e104]
+            - link "Try our Fusion extension" [ref=e107] [cursor=pointer]:
+              - /url: https://fusion.adam.new/install
+              - generic [ref=e108]: Try our Fusion extension
+              - img [ref=e109]
