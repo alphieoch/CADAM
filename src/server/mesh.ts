@@ -6,6 +6,7 @@ import {
   generateImageWithFalFlux,
   generateImageWithGeminiMultiTurn,
   generateImageWithGptImage2,
+  generateImageWithGrok,
   INSTRUCTIONS_3D as instructions3D,
   type GptImageQuality,
 } from './imageGen';
@@ -191,79 +192,106 @@ async function generateMeshImage(
     conversationId,
   };
 
-  let provider: 'gpt-image-2' | 'nano-banana-pro' | 'flux';
+  let provider:
+    | 'grok-imagine'
+    | 'gpt-image-2'
+    | 'nano-banana-pro'
+    | 'flux';
   let result: {
     imageBytes: Buffer;
     imageCallId: string | null;
     contentType: 'image/jpeg' | 'image/png';
   };
 
+  // Try Grok Imagine first (cheapest and fastest for 3D seed images)
   try {
-    result = await generateImageWithGptImage2(
+    const imageBytes = await generateImageWithGrok(
       storageCompat as any,
-      getOpenAI(),
       userId,
       conversationId,
       prompt,
       gptImageReferenceImages,
-      priorImageCallId,
-      QUALITY_BY_MESH_MODEL[sentryStage.meshModel],
     );
-    provider = 'gpt-image-2';
-  } catch (gptImageError) {
-    logError(gptImageError, {
+    // Grok Imagine returns JPEG via the b64_json path.
+    result = { imageBytes, imageCallId: null, contentType: 'image/jpeg' };
+    provider = 'grok-imagine';
+  } catch (grokError) {
+    logError(grokError, {
       ...sentryContext,
       additionalContext: {
-        stage: 'gpt_image_2_fallback',
+        stage: 'grok_imagine_fallback',
         hasFreshUserImages,
         priorImageCallIdStatus,
         ...sentryStage,
       },
     });
     try {
-      const imageBytes = await generateImageWithGeminiMultiTurn(
+      result = await generateImageWithGptImage2(
         storageCompat as any,
-        getGoogleGenAI(),
+        getOpenAI(),
         userId,
         conversationId,
         prompt,
         gptImageReferenceImages,
+        priorImageCallId,
+        QUALITY_BY_MESH_MODEL[sentryStage.meshModel],
       );
-      // Gemini Multi-Turn returns png.
-      result = { imageBytes, imageCallId: null, contentType: 'image/png' };
-      provider = 'nano-banana-pro';
-    } catch (geminiError) {
-      logError(geminiError, {
+      provider = 'gpt-image-2';
+    } catch (gptImageError) {
+      logError(gptImageError, {
         ...sentryContext,
         additionalContext: {
-          stage: 'nano_banana_pro_fallback',
+          stage: 'gpt_image_2_fallback',
           hasFreshUserImages,
           priorImageCallIdStatus,
           ...sentryStage,
         },
       });
       try {
-        const imageBytes = await generateImageWithFalFlux(
+        const imageBytes = await generateImageWithGeminiMultiTurn(
           storageCompat as any,
+          getGoogleGenAI(),
           userId,
           conversationId,
           prompt,
           gptImageReferenceImages,
         );
-        // Flux returns png per its output_format config.
+        // Gemini Multi-Turn returns png.
         result = { imageBytes, imageCallId: null, contentType: 'image/png' };
-        provider = 'flux';
-      } catch (fluxError) {
-        logError(fluxError, {
+        provider = 'nano-banana-pro';
+      } catch (geminiError) {
+        logError(geminiError, {
           ...sentryContext,
           additionalContext: {
-            stage: 'flux_fallback',
+            stage: 'nano_banana_pro_fallback',
             hasFreshUserImages,
             priorImageCallIdStatus,
             ...sentryStage,
           },
         });
-        throw fluxError;
+        try {
+          const imageBytes = await generateImageWithFalFlux(
+            storageCompat as any,
+            userId,
+            conversationId,
+            prompt,
+            gptImageReferenceImages,
+          );
+          // Flux returns png per its output_format config.
+          result = { imageBytes, imageCallId: null, contentType: 'image/png' };
+          provider = 'flux';
+        } catch (fluxError) {
+          logError(fluxError, {
+            ...sentryContext,
+            additionalContext: {
+              stage: 'flux_fallback',
+              hasFreshUserImages,
+              priorImageCallIdStatus,
+              ...sentryStage,
+            },
+          });
+          throw fluxError;
+        }
       }
     }
   }
@@ -400,12 +428,13 @@ export async function handleMeshRequest(req: Request) {
     const hasFalKey = !!env('FAL_KEY');
     const hasOpenAIKey = !!env('OPENAI_API_KEY');
     const hasGoogleKey = !!env('GOOGLE_API_KEY');
-    if (!hasFalKey && !hasOpenAIKey && !hasGoogleKey) {
+    const hasXaiKey = !!env('XAI_API_KEY');
+    if (!hasFalKey && !hasOpenAIKey && !hasGoogleKey && !hasXaiKey) {
       return new Response(
         JSON.stringify({
           error: {
             message:
-              'Mesh generation is not configured. FAL_KEY, OPENAI_API_KEY, or GOOGLE_API_KEY must be set.',
+              'Mesh generation is not configured. FAL_KEY, OPENAI_API_KEY, GOOGLE_API_KEY, or XAI_API_KEY must be set.',
             code: 'mesh_not_configured',
           },
         }),

@@ -426,6 +426,125 @@ export const generateImageWithFalFlux = async (
   }
 };
 
+/**
+ * Generates an image with Grok Imagine via the xAI API.
+ * The xAI API is OpenAI-compatible, so we use the openai SDK with a custom baseURL.
+ *
+ * Supports text-to-image and image-to-image (editing) with base64 reference images.
+ * Returns jpeg bytes.
+ */
+export const generateImageWithGrok = async (
+  storageCompat: { storage: { from(bucket: string): { download(path: string): Promise<{ data: { type: string; arrayBuffer(): Promise<ArrayBuffer> } | null; error: unknown }> } } },
+  userId: string,
+  conversationId: string,
+  prompt: string,
+  images: string[],
+): Promise<Buffer> => {
+  const xaiKey = env('XAI_API_KEY');
+  if (!xaiKey) {
+    throw new Error('XAI_API_KEY is not set');
+  }
+
+  debugLog('Generating image with Grok Imagine', {
+    userId,
+    conversationId,
+    prompt,
+    imagesCount: images.length,
+  });
+
+  // Build request body for xAI /v1/images/generations
+  const body: Record<string, unknown> = {
+    model: 'grok-imagine-image-quality',
+    prompt: prompt || 'Generate an image',
+    n: 1,
+    response_format: 'b64_json',
+    aspect_ratio: '1:1',
+    resolution: '1k',
+  };
+
+  // Handle reference images for image-to-image editing
+  if (images.length > 0) {
+    const latestImageId = images[images.length - 1];
+    const { data: imageData, error: downloadError } = await storageCompat.storage
+      .from('images')
+      .download(`${userId}/${conversationId}/${latestImageId}`);
+
+    if (downloadError || !imageData) {
+      console.warn(
+        `Grok: failed to download reference image ${latestImageId}, falling back to text-only`,
+        downloadError,
+      );
+    } else {
+      const imageArrayBuffer = await imageData.arrayBuffer();
+      const base64Image = Buffer.from(imageArrayBuffer).toString('base64');
+      const mimeType =
+        imageData.type && imageData.type.startsWith('image/')
+          ? imageData.type
+          : 'image/png';
+
+      // xAI Imagine API supports image_url with base64 data URI for editing
+      body.image_url = `data:${mimeType};base64,${base64Image}`;
+      debugLog('Grok: attached reference image for editing', {
+        latestImageId,
+        mimeType,
+        base64Length: (body.image_url as string).length,
+      });
+    }
+  }
+
+  const response = await fetch('https://api.x.ai/v1/images/generations', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${xaiKey}`,
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text().catch(() => 'Unknown error');
+    throw new Error(
+      `Grok image generation failed: ${response.status} ${response.statusText} - ${errorText}`,
+    );
+  }
+
+  const result = (await response.json()) as {
+    data?: Array<{ b64_json?: string; url?: string }>;
+    error?: { message?: string };
+  };
+
+  if (result.error?.message) {
+    throw new Error(`Grok image generation error: ${result.error.message}`);
+  }
+
+  const firstImage = result.data?.[0];
+  if (!firstImage) {
+    throw new Error('Grok image generation returned no image data');
+  }
+
+  let imageBytes: Buffer;
+  if (firstImage.b64_json) {
+    imageBytes = Buffer.from(firstImage.b64_json, 'base64');
+  } else if (firstImage.url) {
+    const imageResponse = await fetch(firstImage.url);
+    if (!imageResponse.ok) {
+      throw new Error(
+        `Failed to download Grok image from URL: ${imageResponse.status}`,
+      );
+    }
+    const arrayBuffer = await imageResponse.arrayBuffer();
+    imageBytes = Buffer.from(arrayBuffer);
+  } else {
+    throw new Error('Grok image generation returned neither b64_json nor url');
+  }
+
+  debugLog('Successfully generated image with Grok Imagine', {
+    byteLength: imageBytes.byteLength,
+  });
+
+  return imageBytes;
+};
+
 /* DEPRECATED: Replaced by generateImageWithFalFlux
    Keeping for potential rollback. Remove after migration confirmed stable.
 export const generateImageWithFlux = async (
