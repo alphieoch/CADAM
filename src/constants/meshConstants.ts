@@ -46,7 +46,7 @@ export interface ModelConfig {
 
 export const MODEL_CONFIGS: Record<CreativeModel, ModelConfig> = {
   fast: {
-    brightness: MATERIAL_DEFAULTS.BRIGHTNESS_TEXTURELESS,
+    brightness: MATERIAL_DEFAULTS.BRIGHTNESS,
     roughness: MATERIAL_DEFAULTS.ROUGHNESS,
     normalIntensity: MATERIAL_DEFAULTS.NORMAL_INTENSITY,
     polygonCount: {
@@ -65,7 +65,7 @@ export const MODEL_CONFIGS: Record<CreativeModel, ModelConfig> = {
       quads: POLYGON_COUNTS.STANDARD_DEFAULT,
       polys: POLYGON_COUNTS.STANDARD_DEFAULT,
     },
-    showPolygonControls: false, // SAM 3D doesn't support polygon/quad controls
+    showPolygonControls: false,
     showNormalIntensity: true,
     maxPolygonCount: POLYGON_COUNTS.STANDARD_MAX,
   },
@@ -77,9 +77,9 @@ export const MODEL_CONFIGS: Record<CreativeModel, ModelConfig> = {
       quads: POLYGON_COUNTS.ULTRA_DEFAULT,
       polys: POLYGON_COUNTS.ULTRA_DEFAULT,
     },
-    showPolygonControls: true,
+    showPolygonControls: false, // TRELLIS-2 doesn't expose polygon controls
     showNormalIntensity: true,
-    maxPolygonCount: POLYGON_COUNTS.ULTRA_MAX, // Meshy v6 limit is 300k
+    maxPolygonCount: POLYGON_COUNTS.ULTRA_MAX,
   },
 };
 

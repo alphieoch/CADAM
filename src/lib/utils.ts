@@ -297,20 +297,20 @@ export const CREATIVE_MODELS: ModelConfig[] = [
   {
     id: 'ultra',
     name: 'Max Quality',
-    description: 'Highest quality mesh and clean topology',
-    timeEstimate: '5-6 minutes',
+    description: 'Highest fidelity mesh with PBR materials and clean topology',
+    timeEstimate: '~2-3 min',
   },
   {
     id: 'quality',
     name: 'Draft',
-    description: 'Rough quality for quick iterations',
-    timeEstimate: '~45 seconds',
+    description: 'Great quality for games, prototypes, and previews',
+    timeEstimate: '~40 sec',
   },
   {
     id: 'fast',
-    name: 'Textureless',
-    description: 'Faster, with simpler, textureless output.',
-    timeEstimate: '60-90 seconds',
+    name: 'Fast',
+    description: 'Fastest generation, lower cost — great for quick drafts',
+    timeEstimate: '~30 sec',
   },
 ];
 

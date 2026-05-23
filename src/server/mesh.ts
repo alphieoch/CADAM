@@ -10,6 +10,16 @@ import {
   INSTRUCTIONS_3D as instructions3D,
   type GptImageQuality,
 } from './imageGen';
+import {
+  uploadKreaAsset,
+  executeKrea3D,
+  pollKreaJob,
+  downloadGlb,
+} from './krea3d';
+import {
+  generate3DWithReplicate,
+  hasReplicateToken,
+} from './replicate3d';
 import { Model, MeshFileType } from '@shared/types';
 import { query } from './dbClient';
 import {
@@ -23,7 +33,15 @@ import { logApiError, logError } from './serverLog';
 import { Buffer } from 'node:buffer';
 import { env, requiredEnv, webhookBaseUrl } from './env';
 
-const MESH_TOKEN_COST = 30;
+// Token costs by quality tier — maps to actual inference cost differences
+// fast:    low-quality seed image + Krea 3D  (~$0.02 total)
+// quality: high-quality seed image + Krea 3D (~$0.25 total)
+// ultra:   high-quality seed image + Replicate TRELLIS-2 (~$0.30 total)
+const MESH_TOKEN_COSTS: Record<Model, number> = {
+  fast: 15,
+  quality: 30,
+  ultra: 60,
+};
 
 // Initialize Sentry for error logging
 
@@ -429,12 +447,13 @@ export async function handleMeshRequest(req: Request) {
     const hasOpenAIKey = !!env('OPENAI_API_KEY');
     const hasGoogleKey = !!env('GOOGLE_API_KEY');
     const hasXaiKey = !!env('XAI_API_KEY');
-    if (!hasFalKey && !hasOpenAIKey && !hasGoogleKey && !hasXaiKey) {
+    const hasKreaKey = !!env('KREA_API_KEY');
+    if (!hasFalKey && !hasOpenAIKey && !hasGoogleKey && !hasXaiKey && !hasKreaKey) {
       return new Response(
         JSON.stringify({
           error: {
             message:
-              'Mesh generation is not configured. FAL_KEY, OPENAI_API_KEY, GOOGLE_API_KEY, or XAI_API_KEY must be set.',
+              'Mesh generation is not configured. FAL_KEY, OPENAI_API_KEY, GOOGLE_API_KEY, XAI_API_KEY, or KREA_API_KEY must be set.',
             code: 'mesh_not_configured',
           },
         }),
@@ -447,44 +466,6 @@ export async function handleMeshRequest(req: Request) {
 
     ensureFalConfig();
     const appBaseUrl = webhookBaseUrl(req.url);
-    const meshReferenceId = crypto.randomUUID();
-    try {
-      const result = await billing.consume(user.email, {
-        tokens: MESH_TOKEN_COST,
-        operation: 'mesh',
-        referenceId: meshReferenceId,
-      });
-      if (!result.ok) {
-        return new Response(
-          JSON.stringify({
-            error: {
-              message: 'insufficient_tokens',
-              code: 'insufficient_tokens',
-              tokensRequired: result.tokensRequired,
-              tokensAvailable: result.tokensAvailable,
-            },
-          }),
-          {
-            status: 402,
-            headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-          },
-        );
-      }
-    } catch (err) {
-      const status = err instanceof BillingClientError ? err.status : 502;
-      logError(err, {
-        functionName: 'mesh',
-        statusCode: status,
-        userId: user.id,
-      });
-      return new Response(
-        JSON.stringify({ error: { message: 'billing_unavailable' } }),
-        {
-          status: 502,
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-        },
-      );
-    }
 
     const requestBody = await req.json();
 
@@ -554,6 +535,48 @@ export async function handleMeshRequest(req: Request) {
         JSON.stringify({ error: { message: 'Images or text not found' } }),
         {
           status: 400,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        },
+      );
+    }
+
+    // Deduct tokens based on selected quality tier
+    const meshModel = (model ?? 'quality') as Model;
+    const tokenCost = MESH_TOKEN_COSTS[meshModel] ?? MESH_TOKEN_COSTS.quality;
+    const meshReferenceId = crypto.randomUUID();
+    try {
+      const result = await billing.consume(user.email, {
+        tokens: tokenCost,
+        operation: 'mesh',
+        referenceId: meshReferenceId,
+      });
+      if (!result.ok) {
+        return new Response(
+          JSON.stringify({
+            error: {
+              message: 'insufficient_tokens',
+              code: 'insufficient_tokens',
+              tokensRequired: result.tokensRequired,
+              tokensAvailable: result.tokensAvailable,
+            },
+          }),
+          {
+            status: 402,
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+          },
+        );
+      }
+    } catch (err) {
+      const status = err instanceof BillingClientError ? err.status : 502;
+      logError(err, {
+        functionName: 'mesh',
+        statusCode: status,
+        userId: user.id,
+      });
+      return new Response(
+        JSON.stringify({ error: { message: 'billing_unavailable' } }),
+        {
+          status: 502,
           headers: { ...corsHeaders, 'Content-Type': 'application/json' },
         },
       );
@@ -641,21 +664,6 @@ export async function handleMeshRequest(req: Request) {
       );
     }
 
-    // Skip Flux-based preview for quality model - use Gemini image instead (via createHunyuanPreview)
-    if (model !== 'quality') {
-      runBackgroundTask(
-        submitPreviewJob(
-          text,
-          images,
-          mesh,
-          user.id,
-          conversationId,
-          meshData.id,
-          appBaseUrl,
-        ),
-      );
-    }
-
     console.log('=== SUBMITTING MESH JOB ===');
     debugLog(
       'Final model parameter being passed to submitMeshJob:',
@@ -708,6 +716,83 @@ export async function handleMeshRequest(req: Request) {
 }
 
 
+/**
+ * Generate a 3D mesh using Krea's TRELLIS node app and upload to Azure Blob.
+ * Downloads the seed image, uploads to Krea, executes 3D generation, polls,
+ * then uploads the resulting GLB to both meshes and previews containers.
+ */
+async function generate3DWithKrea(
+  imageUrl: string,
+  meshId: string,
+  userId: string,
+  conversationId: string,
+) {
+  debugLog('Starting Krea 3D generation for mesh:', meshId);
+
+  // Download seed image from Azure signed URL
+  const imageResponse = await fetch(imageUrl);
+  if (!imageResponse.ok) {
+    throw new Error(`Failed to download seed image: ${imageResponse.status}`);
+  }
+  const imageBuffer = Buffer.from(await imageResponse.arrayBuffer());
+
+  // Upload to Krea assets
+  const kreaImageUrl = await uploadKreaAsset(imageBuffer, 'image/png');
+
+  // Execute Krea 3D node app
+  const jobId = await executeKrea3D(kreaImageUrl);
+
+  // Poll until complete
+  const { trellisUrl } = await pollKreaJob(jobId);
+
+  // Download GLB
+  const glbBuffer = await downloadGlb(trellisUrl);
+  debugLog('Krea GLB downloaded:', glbBuffer.length, 'bytes');
+
+  // Get file_type from DB (Krea always returns GLB, but DB may have different file_type)
+  const meshTypeResult = await query(
+    'SELECT file_type FROM meshes WHERE id = $1',
+    [meshId],
+  );
+  const fileType = meshTypeResult.rows[0]?.file_type ?? 'glb';
+  // Krea always returns GLB regardless of requested file_type
+  const storageExt = 'glb';
+
+  // Upload GLB to Azure Blob (meshes container)
+  const meshStoragePath = `${userId}/${conversationId}/${meshId}.${storageExt}`;
+  await uploadBlob(
+    'meshes',
+    meshStoragePath,
+    glbBuffer,
+    'model/gltf-binary',
+  );
+
+  // Create preview record first to get the ID
+  const previewInsertResult = await query(
+    `INSERT INTO previews (user_id, conversation_id, mesh_id, status)
+     VALUES ($1, $2, $3, 'success')
+     RETURNING id`,
+    [userId, conversationId, meshId],
+  );
+  const previewId = previewInsertResult.rows[0]?.id;
+
+  if (previewId) {
+    // Upload to previews container using preview ID as filename
+    const previewStoragePath = `${userId}/${conversationId}/${previewId}.glb`;
+    await uploadBlob(
+      'previews',
+      previewStoragePath,
+      glbBuffer,
+      'model/gltf-binary',
+    );
+  }
+
+  // Update mesh status to success and set file_type to glb (Krea only returns GLB)
+  await query("UPDATE meshes SET status = 'success', file_type = 'glb' WHERE id = $1", [meshId]);
+
+  debugLog('Krea 3D generation complete for mesh:', meshId);
+}
+
 // Function that submits a mesh job to fal
 async function submitMeshJob(
   text: string | undefined,
@@ -721,7 +806,6 @@ async function submitMeshJob(
   polygonCount: number | undefined,
   appBaseUrl: string,
 ) {
-  ensureFalConfig();
   debugLog('=== SUBMIT MESH JOB FUNCTION CALLED ===');
   debugLog('submitMeshJob received model:', model);
   // debugLog('submitMeshJob model === ultra:', model === 'ultra');
@@ -963,11 +1047,25 @@ async function submitMeshJob(
     debugLog('=== CHECKING MODEL TYPE ===');
     debugLog('model value:', model);
 
-    if (model === 'ultra') {
-      debugLog('=== ENTERING ULTRA MODEL PATH (MESHY V6 PREVIEW) ===');
+    // ========================================================================
+    // 3D QUALITY TIER SYSTEM
+    // ========================================================================
+    // fast    → Krea basic TRELLIS (low-poly, textured, ~30s) — game assets
+    // quality → Krea basic TRELLIS (same as fast for now — Krea only has one
+    //           node app available via API)
+    // ultra   → Replicate TRELLIS-2 (high-poly, PBR, ~1-3min) — 3D printing
+    //           Falls back to Krea if REPLICATE_API_TOKEN is not set.
+    // ========================================================================
 
-      // Check if this is first generation or conversational edit by looking for COMPLETED meshes (not images)
-      // This properly handles branching - a branch won't have completed meshes
+    const useReplicate = model === 'ultra' && hasReplicateToken();
+    const backend = useReplicate ? 'replicate-trellis-2' : 'krea-basic';
+
+    debugLog(`=== 3D GENERATION: model=${model} backend=${backend} ===`);
+
+    if (model === 'ultra') {
+      debugLog('=== ENTERING ULTRA MODEL PATH ===');
+
+      // Check if this is first generation or conversational edit
       const existingCompletedMeshes = await query(
         `SELECT id FROM meshes WHERE conversation_id = $1 AND user_id = $2 AND status = 'success'`,
         [conversationId, userId],
@@ -981,7 +1079,6 @@ async function submitMeshJob(
         `Ultra generation type: First=${isFirstGeneration}, HasImages=${hasUploadedImages}, HasText=${hasText}`,
       );
 
-      // Validate we have something to work with
       if (!hasText && !hasUploadedImages && isFirstGeneration) {
         throw new Error('No text or images provided for ultra generation');
       }
@@ -1012,9 +1109,7 @@ async function submitMeshJob(
         meshId,
       ]);
 
-      // Use the shared INSTRUCTIONS_3D preamble (imported as instructions3D).
-
-      // Build the prompt based on conversation stage.
+      // Build prompt based on conversation stage
       let ultraPrompt: string;
       let ultraSubStage: string;
       if (isFirstGeneration && !hasUploadedImages && hasText) {
@@ -1046,7 +1141,6 @@ async function submitMeshJob(
         { meshModel: 'ultra', subStage: ultraSubStage },
       );
 
-      // Upload the generated base image
       await uploadBlob(
         'images',
         `${userId}/${conversationId}/${imageData.id}`,
@@ -1059,307 +1153,34 @@ async function submitMeshJob(
         [imageCallId, imageData.id],
       );
 
-      // Get signed URL for the base image to send to Meshy
       const baseImageUrl = await getSignedUrl(
         'images',
         `${userId}/${conversationId}/${imageData.id}`,
         60,
       );
 
-      // Configure Meshy parameters
-      // Topology: default to triangle (Meshy standard), but respect quad if requested
-      const meshyTopology = meshTopology === 'quads' ? 'quad' : 'triangle';
-
-      // Polycount: default 30000, clamp between 200 and 300000 (Meshy v6 API limit)
-      const safePolycount = polygonCount
-        ? Math.max(200, Math.min(300000, polygonCount))
-        : 30000;
-
-      debugLog('Submitting to Meshy v6 Preview', {
-        topology: meshyTopology,
-        polycount: safePolycount,
-      });
-
-      const meshyInput = {
-        image_url: baseImageUrl,
-        topology: meshyTopology as 'quad' | 'triangle',
-        target_polycount: safePolycount,
-        symmetry_mode: 'auto' as const,
-        should_remesh: true,
-        should_texture: true,
-        enable_pbr: true, // Max quality feature
-      };
-
-      await fal.queue.submit('fal-ai/meshy/v6-preview/image-to-3d', {
-        input: meshyInput,
-        webhookUrl: `${appBaseUrl}/cadam/api/fal-webhook?id=${meshId}`,
-      });
-
-      debugLog('Successfully submitted to Meshy v6 Preview');
-
-      // Create preview using the base image
-      await createHunyuanPreview(
-        baseImageUrl,
-        'ultra meshy v6 preview',
-        userId,
-        conversationId,
-        meshId,
-        appBaseUrl,
-      );
+      if (useReplicate) {
+        await generate3DWithReplicate(baseImageUrl, meshId, userId, conversationId);
+      } else {
+        debugLog('REPLICATE_API_TOKEN not set, falling back to Krea for ultra');
+        await generate3DWithKrea(baseImageUrl, meshId, userId, conversationId);
+      }
     } else if (model === 'quality') {
-      debugLog('=== ENTERING QUALITY MODEL PATH (SAM 3D) ===');
+      debugLog('=== ENTERING QUALITY MODEL PATH ===');
 
       if (imageInputs.length === 0) {
         throw new Error('No valid image found for quality mesh generation');
       }
 
-      const imageUrl = imageInputs[0];
-
-      // ========================================================================
-      // SAM 3D PIPELINE WITH MOONDREAM3 CAPTIONING
-      // Strategy:
-      // 1. Pre-fetch Moondream3 long caption and genericize it
-      // 2. Try simple prompt "all the 3d models in the scene" first
-      // 3. If low score, fallback to genericized caption
-      // 4. If still no mask, use full-image box prompt as last resort
-      // ========================================================================
-
-      // ---- Step 1: Caption image with Moondream3 (long only to save CPU) ----
-      let longCaption: string | null = null;
-
-      try {
-        debugLog('Step 1: Captioning image with Moondream3 (long only)...');
-
-        const longResult = await fal.subscribe(
-          'fal-ai/moondream3-preview/caption',
-          {
-            input: { length: 'long', image_url: imageUrl },
-          },
-        );
-
-        const longData = longResult.data;
-        if (longData && typeof longData === 'object' && 'output' in longData) {
-          longCaption =
-            typeof longData.output === 'string' ? longData.output : null;
-        }
-
-        debugLog('Moondream3 caption:', longCaption?.substring(0, 100) + '...');
-
-        // Genericize the caption - replace character names with visual descriptions
-        if (longCaption) {
-          const genericizePrompt = `Replace ALL character names, brand names, IP names, and proper nouns with generic visual descriptions. Keep sentence structure intact.
-
-Rules:
-- Replace ANY character name (Pikachu, Sonic, Mario, Dexter, SpongeBob, etc.) with visual descriptions
-- "Pikachu" -> "yellow creature with pointed ears"
-- "Sonic" -> "blue spiky creature"  
-- "Dexter" -> "boy with glasses" or "humanoid figure"
-- "SpongeBob" -> "yellow sponge creature"
-- Remove references like "from Dexter's Laboratory" or "from Pokemon"
-- Keep color, pose, action, and position descriptions
-- Keep ALL non-name words exactly the same
-
-Input: ${longCaption}
-
-Output:`;
-
-          try {
-            const genericResult = await getGoogleGenAI().models.generateContent(
-              {
-                model: 'gemini-2.5-flash-lite',
-                contents: [
-                  { role: 'user', parts: [{ text: genericizePrompt }] },
-                ],
-              },
-            );
-            const genericText =
-              genericResult.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
-            if (genericText) {
-              longCaption = genericText;
-              debugLog(
-                'Genericized caption:',
-                longCaption.substring(0, 100) + '...',
-              );
-            }
-          } catch (genError) {
-            debugLog('Failed to genericize, using original:', genError);
-          }
-        }
-      } catch (error) {
-        debugLog('Error getting Moondream3 caption:', error);
-      }
-
-      // ---- Step 2: Try prompts with SAM-3/image ----
-      let maskUrl: string | null = null;
-      const MIN_MASK_SCORE = 0.25;
-
-      // Helper to try a prompt with SAM-3/image
-      const tryPrompt = async (name: string, prompt: string) => {
-        try {
-          debugLog(`Trying prompt "${name}":`, prompt);
-          const result = await fal.subscribe('fal-ai/sam-3/image', {
-            input: {
-              image_url: imageUrl,
-              prompt: prompt,
-              apply_mask: false,
-              include_scores: true,
-            },
-          });
-
-          const data = result.data;
-          if (!data || typeof data !== 'object') {
-            return { name, score: 0, url: null };
-          }
-
-          const masks =
-            'masks' in data && Array.isArray(data.masks) ? data.masks : [];
-          const scores =
-            'scores' in data && Array.isArray(data.scores) ? data.scores : [];
-
-          const score = typeof scores[0] === 'number' ? scores[0] : 0;
-          const firstMask = masks[0];
-          const url =
-            firstMask &&
-            typeof firstMask === 'object' &&
-            'url' in firstMask &&
-            typeof firstMask.url === 'string'
-              ? firstMask.url
-              : null;
-
-          debugLog(`Prompt "${name}" result:`, { score, hasMask: !!url });
-          return { name, score, url };
-        } catch (error) {
-          debugLog(`Prompt "${name}" failed:`, error);
-          return { name, score: 0, url: null };
-        }
-      };
-
-      // Try "simple" first, fallback to long_caption
-      debugLog('Step 2: Trying "simple" prompt first...');
-      let result = await tryPrompt('simple', 'all the 3d models in the image');
-
-      if (result.url && result.score >= MIN_MASK_SCORE) {
-        maskUrl = result.url;
-        debugLog('SUCCESS: Using "simple" mask, score:', result.score);
-      } else if (longCaption) {
-        debugLog(
-          '"simple" failed or low score, trying long_caption fallback...',
-        );
-        result = await tryPrompt('long_caption', longCaption);
-
-        if (result.url && result.score >= MIN_MASK_SCORE) {
-          maskUrl = result.url;
-          debugLog(
-            'SUCCESS: Using "long_caption" fallback mask, score:',
-            result.score,
-          );
-        }
-      } else {
-        debugLog(
-          'WARNING: Simple prompt failed and no Moondream caption available for fallback',
-        );
-      }
-
-      if (maskUrl) {
-        debugLog('Selected mask URL:', maskUrl.substring(0, 50) + '...');
-      } else {
-        debugLog('No valid mask from prompts, will use box fallback');
-      }
-
-      // Build SAM-3D input
-      interface Sam3dInput {
-        image_url: string;
-        mask_urls?: string[];
-        box_prompts?: {
-          x_min: number;
-          y_min: number;
-          x_max: number;
-          y_max: number;
-          object_id: number;
-        }[];
-      }
-      const sam3dInput: Sam3dInput = { image_url: imageUrl };
-
-      if (maskUrl) {
-        sam3dInput.mask_urls = [maskUrl];
-        debugLog('Using SAM-3/image mask for SAM 3D');
-      } else {
-        // Fallback: full-image box prompt (5% inset, assumes 1024x1024)
-        // This guarantees segmentation when text prompts fail
-        sam3dInput.box_prompts = [
-          { x_min: 51, y_min: 51, x_max: 973, y_max: 973, object_id: 1 },
-        ];
-        debugLog('No mask found, using full-image box fallback');
-      }
-
-      debugLog('SAM 3D input:', JSON.stringify(sam3dInput, null, 2));
-
-      await fal.queue.submit('fal-ai/sam-3/3d-objects', {
-        input: sam3dInput,
-        webhookUrl: `${appBaseUrl}/cadam/api/fal-webhook?id=${meshId}`,
-      });
-
-      debugLog('Successfully submitted to SAM 3D');
-
-      // Create preview
-      await createHunyuanPreview(
-        imageUrl,
-        'quality SAM 3D seed image',
-        userId,
-        conversationId,
-        meshId,
-        appBaseUrl,
-      );
+      await generate3DWithKrea(imageInputs[0], meshId, userId, conversationId);
     } else {
-      debugLog('=== ENTERING FAST MODEL PATH (TRIPO TEXTURELESS) ===');
+      debugLog('=== ENTERING FAST MODEL PATH ===');
 
-      // Use the image generated in the earlier block
       if (imageInputs.length === 0) {
-        throw new Error('No valid image found for textureless mesh generation');
+        throw new Error('No valid image found for fast mesh generation');
       }
 
-      // Submit to Tripo v2.5 with the generated image
-      // NOTE: H3.1 (newer model) currently returns downstream_service_error on
-      // textureless requests (Tripo-side 500). Reverted to v2.5 until fixed.
-      const tripoInput = {
-        image_url: imageInputs[0],
-        texture: 'no' as const,
-        orientation: 'default' as const,
-        // Cap face count for textureless generations at 50k
-        ...(polygonCount !== undefined
-          ? { face_limit: Math.min(polygonCount, TEXTURELESS_MAX_POLYGONS) }
-          : { face_limit: TEXTURELESS_MAX_POLYGONS }),
-      };
-      try {
-        await fal.queue.submit('tripo3d/tripo/v2.5/image-to-3d', {
-          input: tripoInput,
-          webhookUrl: `${appBaseUrl}/cadam/api/fal-webhook?id=${meshId}`,
-        });
-        debugLog(
-          'Successfully submitted to Tripo v2.5 textureless with conversational context',
-        );
-      } catch (submitError) {
-        console.error('Tripo v2.5 submit failed:', {
-          message:
-            submitError instanceof Error
-              ? submitError.message
-              : String(submitError),
-          status: optionalErrorField(submitError, 'status'),
-          body: optionalErrorField(submitError, 'body'),
-          input: tripoInput,
-        });
-        throw submitError;
-      }
-
-      // Create preview using the generated image
-      await createHunyuanPreview(
-        imageInputs[0],
-        'textureless preview',
-        userId,
-        conversationId,
-        meshId,
-        appBaseUrl,
-      );
+      await generate3DWithKrea(imageInputs[0], meshId, userId, conversationId);
     }
   } catch (error) {
     console.error('Mesh generation failed:', {
@@ -1373,9 +1194,12 @@ Output:`;
       appBaseUrl,
     });
 
+    const backend = model === 'ultra' && hasReplicateToken()
+      ? 'Replicate TRELLIS-2'
+      : 'Krea 3D';
     logApiError(error, {
       functionName: 'mesh',
-      apiName: 'FAL AI',
+      apiName: backend,
       statusCode: 500,
       userId,
       conversationId,

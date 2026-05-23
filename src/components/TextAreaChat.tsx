@@ -671,9 +671,9 @@ function TextAreaChat({
     if (type === 'creative') {
       if (images.length > 0) return 'Edit uploaded image...';
       // Model-specific placeholders
-      if (model === 'quality') return 'Make a rough 3D asset...';
-      if (model === 'fast') return 'Make a textureless 3D asset...';
-      if (model === 'ultra') return 'Make a production ready 3D asset...';
+      if (model === 'quality') return 'Make a 3D draft...';
+      if (model === 'fast') return 'Make a quick 3D draft...';
+      if (model === 'ultra') return 'Make a production-ready 3D asset...';
       return 'Speak anything into existence...';
     }
     return placeholder;
