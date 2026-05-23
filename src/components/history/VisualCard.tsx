@@ -30,7 +30,7 @@ import {
 import { formatDistanceToNow } from 'date-fns';
 import { HistoryConversation } from '../../types/misc.ts';
 import { GoodEarth } from '../icons/ui/GoodEarth';
-import { supabase } from '@/lib/supabase';
+// Removed supabase import - using Azure storage API instead
 import { useOpenSCAD } from '@/hooks/useOpenSCAD';
 import { usePreview } from '@/hooks/usePreview';
 import { generatePreview, generateColoredPreview } from '@/utils/meshUtils';
@@ -79,15 +79,14 @@ export function VisualCard({
     queryKey: ['conversation-latest-preview', conversation.id],
     enabled: isVisible,
     queryFn: async () => {
-      const { data: messages, error } = await supabase
-        .from('messages')
-        .select('id, parts')
-        .eq('conversation_id', conversation.id)
-        .eq('role', 'assistant')
-        .order('created_at', { ascending: false })
-        .limit(50);
-      if (error) throw error;
+      const res = await fetch(
+        `${import.meta.env.BASE_URL}/api/conversations/${conversation.id}/messages`,
+        { credentials: 'include' },
+      );
+      if (!res.ok) throw new Error('Failed to load messages');
+      const messages = await res.json();
       for (const message of messages ?? []) {
+        if (message.role !== 'assistant') continue;
         const latest = findLatestVisualPreview(message.parts, message.id);
         if (latest) return latest;
       }
@@ -104,12 +103,16 @@ export function VisualCard({
     generateBlob: async () => {
       if (!preview) throw new Error('No preview');
       if (preview.type === 'mesh') {
-        const { data: meshBlob, error } = await supabase.storage
-          .from('meshes')
-          .download(
-            `${conversation.user_id}/${conversation.id}/${preview.meshId}.${preview.fileType}`,
-          );
-        if (error || !meshBlob) throw error ?? new Error('Mesh blob missing');
+        const storagePath = `${conversation.user_id}/${conversation.id}/${preview.meshId}.${preview.fileType}`;
+        const signedRes = await fetch(
+          `${import.meta.env.BASE_URL}/api/storage?container=meshes&path=${encodeURIComponent(storagePath)}`,
+          { credentials: 'include' },
+        );
+        if (!signedRes.ok) throw new Error('Failed to get signed URL for mesh');
+        const { url: signedUrl } = await signedRes.json();
+        const downloadRes = await fetch(signedUrl);
+        if (!downloadRes.ok) throw new Error('Failed to download mesh');
+        const meshBlob = await downloadRes.blob();
         return dataUrlToBlob(await generatePreview(meshBlob, preview.fileType));
       }
       // Use the PREVIEW path (not EXPORT) so we get the OFF companion file

@@ -9,7 +9,7 @@ import {
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group';
-import { supabase } from '@/lib/supabase';
+// Removed supabase import - using API endpoints instead
 import * as Sentry from '@sentry/react';
 import { useToast } from '@/hooks/use-toast';
 import { useMutation } from '@tanstack/react-query';
@@ -48,8 +48,12 @@ export const DeleteAccountDialog = ({
       });
     },
     onSuccess: () => {
-      // Sign out locally and redirect after deletion
-      supabase.auth.signOut();
+      // Sign out via API and redirect after deletion
+      await fetch(`${import.meta.env.BASE_URL}/api/auth/logout`, {
+        method: 'POST',
+        credentials: 'include',
+      });
+      window.location.href = '/cadam/signin';
     },
     onError: (error) => {
       Sentry.captureException(error);

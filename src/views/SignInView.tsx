@@ -12,7 +12,7 @@ import {
 } from '@/components/ui/input-otp';
 import { useToast } from '@/hooks/use-toast';
 import { useAuth } from '@/contexts/AuthContext';
-import { AuthError } from '@supabase/supabase-js';
+
 import { useMutation } from '@tanstack/react-query';
 import { GoogleIcon, MicrosoftIcon } from '@/components/icons/CompanyIcons';
 import { validateRedirectUrl } from '@/lib/utils';
@@ -106,7 +106,7 @@ export function SignInView() {
       // Navigate to validated redirect path
       navigate(getRedirectNavigationOptions(redirectPath));
     } catch (err) {
-      const error = err as AuthError;
+      const error = err as Error;
       const message =
         error.message === 'Invalid login credentials'
           ? 'Invalid email or password'
@@ -131,7 +131,7 @@ export function SignInView() {
       await signInWithMagicLink(email);
       setMagicLinkSent(true);
     } catch (err) {
-      const error = err as AuthError;
+      const error = err as Error;
       setError(error.message);
       toast({
         title: 'Whoopsies',
@@ -154,7 +154,7 @@ export function SignInView() {
       await verifyOtp(email, otp);
       navigate(getRedirectNavigationOptions(redirectPath));
     } catch (err) {
-      const error = err as AuthError;
+      const error = err as Error;
       setError(error.message);
       toast({
         title: 'Whoopsies',

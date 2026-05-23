@@ -1,31 +1,13 @@
 import { useCallback } from 'react';
-import { supabase } from '@/lib/supabase';
 
 export function useRequestCancellation() {
   const cancelRequest = useCallback(async (messageId: string) => {
-    const channelName = `cancel-request-${messageId}`;
-
-    // Create a temporary channel to broadcast the cancellation
-    const channel = supabase.channel(channelName);
-
-    try {
-      // Subscribe to the channel first
-      channel.subscribe();
-
-      // Broadcast the cancellation signal
-      await channel.send({
-        type: 'broadcast',
-        event: 'cancel',
-        payload: { messageId, timestamp: Date.now() },
-      });
-
-      console.log(`Sent cancellation signal for message ${messageId}`);
-    } catch (error) {
-      console.error('Failed to send cancellation signal:', error);
-    } finally {
-      // Clean up the channel
-      supabase.removeChannel(channel);
-    }
+    // Request cancellation via Supabase Realtime is not yet migrated to Azure.
+    // For now, this is a no-op. Cancellation can be implemented via:
+    // 1. Azure SignalR Service
+    // 2. Azure Event Grid
+    // 3. SSE (Server-Sent Events) with an abort controller
+    console.log(`Cancellation for message ${messageId} not yet supported in Azure-native mode`);
   }, []);
 
   return { cancelRequest };

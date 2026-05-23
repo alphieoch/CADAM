@@ -46,7 +46,7 @@ import {
 import { Slider } from '@/components/ui/slider';
 import { Input } from '@/components/ui/input';
 import { useMutation } from '@tanstack/react-query';
-import { supabase } from '@/lib/supabase';
+
 import { useAuth } from '@/contexts/AuthContext';
 import { ModelSelector } from '@/components/ModelSelector';
 import { Button } from '@/components/ui/button';
@@ -796,11 +796,19 @@ function TextAreaChat({
 
   const { mutateAsync: uploadImageAsync } = useMutation({
     mutationFn: async ({ file, id }: { file: File; id: string }) => {
-      const { error } = await supabase.storage
-        .from('images')
-        .upload(`${conversation.user_id}/${conversation.id}/${id}`, file);
+      const path = `${conversation.user_id}/${conversation.id}/${id}`;
+      const formData = new FormData();
+      formData.append('container', 'images');
+      formData.append('path', path);
+      formData.append('file', file);
 
-      if (error) throw error;
+      const res = await fetch(`${import.meta.env.BASE_URL}/api/storage`, {
+        method: 'POST',
+        credentials: 'include',
+        body: formData,
+      });
+
+      if (!res.ok) throw new Error('Failed to upload image');
 
       const reader = new FileReader();
       const urlPromise = new Promise((resolve) => {
@@ -826,25 +834,36 @@ function TextAreaChat({
     mutationFn: async ({ file, id }: { file: File; id: string }) => {
       // Determine file extension
       const fileExtension = getMeshFileType(file.name);
+      const meshPath = `${conversation.user_id}/${conversation.id}/${id}.${fileExtension}`;
 
-      const { error } = await supabase.storage
-        .from('meshes')
-        .upload(
-          `${conversation.user_id}/${conversation.id}/${id}.${fileExtension}`,
-          file,
-        );
+      // Upload mesh
+      const meshFormData = new FormData();
+      meshFormData.append('container', 'meshes');
+      meshFormData.append('path', meshPath);
+      meshFormData.append('file', file);
 
-      if (error) throw error;
+      const meshRes = await fetch(`${import.meta.env.BASE_URL}/api/storage`, {
+        method: 'POST',
+        credentials: 'include',
+        body: meshFormData,
+      });
+
+      if (!meshRes.ok) throw new Error('Failed to upload mesh');
 
       // Check if preview exists in storage
       const previewPath = `${conversation.user_id}/${conversation.id}/preview-${id}`;
 
-      const { data } = await supabase.storage
-        .from('images')
-        .createSignedUrl(previewPath, 60 * 60); // 1 hour expiry
-
-      if (data && data.signedUrl) {
-        return data.signedUrl;
+      try {
+        const signedRes = await fetch(
+          `${import.meta.env.BASE_URL}/api/storage?container=images&path=${encodeURIComponent(previewPath)}`,
+          { credentials: 'include' },
+        );
+        if (signedRes.ok) {
+          const { url } = await signedRes.json();
+          return url;
+        }
+      } catch {
+        // Preview doesn't exist yet
       }
 
       // If preview doesn't exist, generate it with the correct file type
@@ -857,23 +876,31 @@ function TextAreaChat({
         const blob = await response.blob();
 
         // Save the preview to storage
-        const { error: uploadError } = await supabase.storage
-          .from('images')
-          .upload(previewPath, blob, {
-            contentType: 'image/png',
-            upsert: true,
-          });
+        const previewFormData = new FormData();
+        previewFormData.append('container', 'images');
+        previewFormData.append('path', previewPath);
+        previewFormData.append('file', blob, 'preview.png');
 
-        if (uploadError) {
-          console.error('Error uploading preview:', uploadError);
+        const uploadRes = await fetch(`${import.meta.env.BASE_URL}/api/storage`, {
+          method: 'POST',
+          credentials: 'include',
+          body: previewFormData,
+        });
+
+        if (!uploadRes.ok) {
+          console.error('Error uploading preview:', await uploadRes.text());
           return preview; // Return the preview anyway even if upload fails
         }
 
         // Get the signed URL of the uploaded preview
-        const { data } = await supabase.storage
-          .from('images')
-          .createSignedUrl(previewPath, 60 * 60); // 1 hour expiry
-        return data?.signedUrl;
+        const signedRes = await fetch(
+          `${import.meta.env.BASE_URL}/api/storage?container=images&path=${encodeURIComponent(previewPath)}`,
+          { credentials: 'include' },
+        );
+        if (signedRes.ok) {
+          const { url } = await signedRes.json();
+          return url;
+        }
       }
 
       // If not the owner, just return the generated preview
@@ -1130,16 +1157,14 @@ function TextAreaChat({
       try {
         const fileExtension = mesh.fileType || 'glb'; // Default to glb if fileType is not set
         await Promise.all([
-          supabase.storage
-            .from('meshes')
-            .remove([
-              `${user?.id}/${conversation.id}/${mesh.id}.${fileExtension}`,
-            ]),
-          supabase.storage
-            .from('images')
-            .remove([
-              `${user?.id}/${conversation.id}/preview-${mesh.id}`,
-            ]),
+          fetch(
+            `${import.meta.env.BASE_URL}/api/storage?container=meshes&path=${encodeURIComponent(`${user?.id}/${conversation.id}/${mesh.id}.${fileExtension}`)}`,
+            { method: 'DELETE', credentials: 'include' },
+          ),
+          fetch(
+            `${import.meta.env.BASE_URL}/api/storage?container=images&path=${encodeURIComponent(`${user?.id}/${conversation.id}/preview-${mesh.id}`)}`,
+            { method: 'DELETE', credentials: 'include' },
+          ),
         ]);
       } catch (error) {
         console.error('Error removing mesh:', error);
@@ -1153,9 +1178,10 @@ function TextAreaChat({
       // Only try to remove from storage if the item has been uploaded
       if (image.source === 'upload') {
         try {
-          await supabase.storage
-            .from('images')
-            .remove([`${user?.id}/${conversation.id}/${image.id}`]);
+          await fetch(
+            `${import.meta.env.BASE_URL}/api/storage?container=images&path=${encodeURIComponent(`${user?.id}/${conversation.id}/${image.id}`)}`,
+            { method: 'DELETE', credentials: 'include' },
+          );
         } catch (error) {
           console.error('Error removing image:', error);
         }

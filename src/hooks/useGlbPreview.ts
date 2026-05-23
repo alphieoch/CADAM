@@ -1,4 +1,3 @@
-import { supabase } from '@/lib/supabase';
 import { useQuery } from '@tanstack/react-query';
 
 export const useGlbPreview = ({ id }: { id?: string }) => {
@@ -9,25 +8,33 @@ export const useGlbPreview = ({ id }: { id?: string }) => {
       if (!id) return null;
 
       // Get most recent successful preview (handles multiple previews per mesh)
-      const { data: previews, error: previewError } = await supabase
-        .from('previews')
-        .select('*')
-        .eq('mesh_id', id)
-        .eq('status', 'success')
-        .order('updated_at', { ascending: false })
-        .limit(1);
+      const previewRes = await fetch(
+        `${import.meta.env.BASE_URL}/api/meshes/${id}/previews`,
+        { credentials: 'include' },
+      );
 
-      const preview = previews?.[0];
+      if (!previewRes.ok) {
+        return null;
+      }
 
-      if (previewError || !preview) return null;
+      const preview = await previewRes.json();
 
       const downloadStart = Date.now();
 
-      const { data: previewBlob } = await supabase.storage
-        .from('previews')
-        .download(
-          `${preview.user_id}/${preview.conversation_id}/${preview.id}.glb`,
-        );
+      const storagePath = `${preview.user_id}/${preview.conversation_id}/${preview.id}.glb`;
+      const signedRes = await fetch(
+        `${import.meta.env.BASE_URL}/api/storage?container=previews&path=${encodeURIComponent(storagePath)}`,
+        { credentials: 'include' },
+      );
+      if (!signedRes.ok) {
+        return null;
+      }
+      const { url: signedUrl } = await signedRes.json();
+      const downloadRes = await fetch(signedUrl);
+      if (!downloadRes.ok) {
+        return null;
+      }
+      const previewBlob = await downloadRes.blob();
 
       const downloadEnd = Date.now();
       const downloadTime = downloadEnd - downloadStart;

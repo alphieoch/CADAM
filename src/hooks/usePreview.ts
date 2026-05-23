@@ -1,5 +1,4 @@
 import { useAuth } from '@/contexts/AuthContext';
-import { supabase } from '@/lib/supabase';
 import { useQuery, type UseQueryResult } from '@tanstack/react-query';
 
 interface UsePreviewOptions {
@@ -12,8 +11,8 @@ interface UsePreviewOptions {
 
 /**
  * "Get or create" cached preview image.
- * Checks Supabase storage at `images/{userId}/{convId}/preview-{id}` and
- * returns a data URL. Generates and uploads if not cached.
+ * Checks Azure Blob Storage via backend API at `images/{userId}/{convId}/preview-{id}`
+ * and returns a data URL. Generates and uploads if not cached.
  */
 export function usePreview({
   id,
@@ -31,22 +30,43 @@ export function usePreview({
       if (!userId || !id) throw new Error('usePreview: missing userId or id');
       const storagePath = `${userId}/${conversationId}/preview-${id}`;
 
-      const { data: existing } = await supabase.storage
-        .from('images')
-        .download(storagePath);
-
-      if (existing) return blobToDataUrl(existing);
+      // Try to get a signed URL for the existing preview
+      try {
+        const signedRes = await fetch(
+          `${import.meta.env.BASE_URL}/api/storage?container=images&path=${encodeURIComponent(storagePath)}`,
+          { credentials: 'include' },
+        );
+        if (signedRes.ok) {
+          const { url } = await signedRes.json();
+          const downloadRes = await fetch(url);
+          if (downloadRes.ok) {
+            const blob = await downloadRes.blob();
+            return blobToDataUrl(blob);
+          }
+        }
+      } catch {
+        // Blob doesn't exist yet, continue to generate
+      }
 
       const blob = await generateBlob();
 
-      const { error: uploadError } = await supabase.storage
-        .from('images')
-        .upload(storagePath, blob, {
-          contentType: 'image/png',
-          upsert: true,
+      // Upload to Azure via backend API
+      try {
+        const formData = new FormData();
+        formData.append('container', 'images');
+        formData.append('path', storagePath);
+        formData.append('file', blob, 'preview.png');
+
+        const uploadRes = await fetch(`${import.meta.env.BASE_URL}/api/storage`, {
+          method: 'POST',
+          credentials: 'include',
+          body: formData,
         });
 
-      if (uploadError) {
+        if (!uploadRes.ok) {
+          console.warn('[usePreview] upload failed, continuing with local blob');
+        }
+      } catch (uploadError) {
         console.warn('[usePreview] upload failed, continuing:', uploadError);
       }
 

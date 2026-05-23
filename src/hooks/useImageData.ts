@@ -1,5 +1,4 @@
 import { useConversation } from '@/contexts/ConversationContext';
-import { supabase } from '@/lib/supabase';
 import { Prompt } from '@shared/types';
 import { useQueries, useQuery } from '@tanstack/react-query';
 
@@ -9,20 +8,23 @@ export function useImageData(id: string) {
   const dataQuery = useQuery({
     queryKey: ['imageData', conversation.user_id, conversation.id, id],
     queryFn: async () => {
-      const { data, error } = await supabase
-        .from('images')
-        .select('*')
-        .eq('id', id)
-        .single()
-        .overrideTypes<{
-          prompt: Prompt;
-        }>();
-
-      if (error) {
-        throw error;
+      const res = await fetch(
+        `${import.meta.env.BASE_URL}/api/images/${id}`,
+        { credentials: 'include' },
+      );
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: 'Failed to load image' }));
+        throw new Error(err.error);
       }
-
-      return data;
+      return res.json() as Promise<{
+        id: string;
+        user_id: string;
+        conversation_id: string;
+        prompt: Prompt;
+        status: string;
+        image_generation_call_id: string | null;
+        created_at: string;
+      }>;
     },
     refetchInterval: (query) => {
       if (query.state.data?.status === 'pending') {
@@ -36,20 +38,28 @@ export function useImageData(id: string) {
     queryKey: ['image', conversation.user_id, conversation.id, id],
     enabled: dataQuery.data?.status === 'success',
     queryFn: async () => {
-      const reader = new FileReader();
-      const { data } = await supabase.storage
-        .from('images')
-        .download(`${conversation.user_id}/${conversation.id}/${id}`);
-      if (!data) {
+      const storagePath = `${conversation.user_id}/${conversation.id}/${id}`;
+      const signedRes = await fetch(
+        `${import.meta.env.BASE_URL}/api/storage?container=images&path=${encodeURIComponent(storagePath)}`,
+        { credentials: 'include' },
+      );
+      if (!signedRes.ok) {
+        throw new Error('Failed to get signed URL for image');
+      }
+      const { url: signedUrl } = await signedRes.json();
+      const downloadRes = await fetch(signedUrl);
+      if (!downloadRes.ok) {
         throw new Error('Failed to download image');
       }
-      const urlPromise = new Promise((resolve) => {
+      const blob = await downloadRes.blob();
+      const reader = new FileReader();
+      const urlPromise = new Promise<string>((resolve) => {
         reader.onload = () => {
           resolve(reader.result as string);
         };
       });
-      reader.readAsDataURL(data);
-      const url = (await urlPromise) as string;
+      reader.readAsDataURL(blob);
+      const url = await urlPromise;
       return { id, url };
     },
   });
@@ -65,20 +75,15 @@ export function useImagesData(ids: string[]) {
       queryKey: ['imageData', conversation.user_id, conversation.id, id],
       enabled: !!id,
       queryFn: async () => {
-        const { data, error } = await supabase
-          .from('images')
-          .select('*')
-          .eq('id', id)
-          .single()
-          .overrideTypes<{
-            prompt: Prompt;
-          }>();
-
-        if (error) {
-          throw error;
+        const res = await fetch(
+          `${import.meta.env.BASE_URL}/api/images/${id}`,
+          { credentials: 'include' },
+        );
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({ error: 'Failed to load image' }));
+          throw new Error(err.error);
         }
-
-        return data;
+        return res.json();
       },
     })),
   });
@@ -91,20 +96,28 @@ export function useImagesData(ids: string[]) {
           query.data && query.data.id === id && query.data.status === 'success',
       ),
       queryFn: async () => {
-        const reader = new FileReader();
-        const { data } = await supabase.storage
-          .from('images')
-          .download(`${conversation.user_id}/${conversation.id}/${id}`);
-        if (!data) {
+        const storagePath = `${conversation.user_id}/${conversation.id}/${id}`;
+        const signedRes = await fetch(
+          `${import.meta.env.BASE_URL}/api/storage?container=images&path=${encodeURIComponent(storagePath)}`,
+          { credentials: 'include' },
+        );
+        if (!signedRes.ok) {
+          throw new Error('Failed to get signed URL for image');
+        }
+        const { url: signedUrl } = await signedRes.json();
+        const downloadRes = await fetch(signedUrl);
+        if (!downloadRes.ok) {
           throw new Error('Failed to download image');
         }
-        const urlPromise = new Promise((resolve) => {
+        const blob = await downloadRes.blob();
+        const reader = new FileReader();
+        const urlPromise = new Promise<string>((resolve) => {
           reader.onload = () => {
             resolve(reader.result as string);
           };
         });
-        reader.readAsDataURL(data);
-        const url = (await urlPromise) as string;
+        reader.readAsDataURL(blob);
+        const url = await urlPromise;
         return { id, url };
       },
     })),

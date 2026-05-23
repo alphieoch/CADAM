@@ -8,7 +8,7 @@ import { useToast } from '@/hooks/use-toast';
 import { previewScadColoredViaToolWorker } from '@/worker/toolWorker';
 import { apiUrl } from '@/services/api';
 import { messageRowToChatMessage, type ChatMessage } from '@/lib/aiMessages';
-import { supabase } from '@/lib/supabase';
+
 import { generateColoredPreview, generatePreview } from '@/utils/meshUtils';
 import type {
   AppUIMessage,
@@ -233,7 +233,7 @@ export function ChatSession({
             // preserving it, the backend can't reconstruct the model prompt.
             return {
               ...replacement,
-              providerExecuted: (existing as { providerExecuted?: boolean }).providerExecuted,
+              providerExecuted: true,
               callProviderMetadata: (existing as { callProviderMetadata?: unknown }).callProviderMetadata,
             };
           }
@@ -312,12 +312,15 @@ export function ChatSession({
               response.blob(),
             );
             const previewPath = `${user.id}/${conversation.id}/preview-${toolCall.toolCallId}`;
-            await supabase.storage
-              .from('images')
-              .upload(previewPath, previewBlob, {
-                contentType: 'image/png',
-                upsert: true,
-              });
+            const formData = new FormData();
+            formData.append('container', 'images');
+            formData.append('path', previewPath);
+            formData.append('file', previewBlob, 'preview.png');
+            await fetch(`${import.meta.env.BASE_URL}/api/storage`, {
+              method: 'POST',
+              credentials: 'include',
+              body: formData,
+            });
           }
         } catch (uploadError) {
           console.warn('Failed to upload OpenSCAD preview:', uploadError);

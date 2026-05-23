@@ -46,3 +46,20 @@ export async function deleteBlob(
   const container = getContainerClient(containerName);
   await container.getBlockBlobClient(blobName).deleteIfExists();
 }
+
+export async function getSignedUrl(
+  containerName: string,
+  blobName: string,
+  expiryMinutes = 60,
+): Promise<string> {
+  const container = getContainerClient(containerName);
+  const blockBlob = container.getBlockBlobClient(blobName);
+  const expiresOn = new Date();
+  expiresOn.setMinutes(expiresOn.getMinutes() + expiryMinutes);
+  const sasUrl = await blockBlob.generateSasUrl({
+    permissions: 'r',
+    expiresOn,
+    protocol: 'https',
+  });
+  return sasUrl;
+}

@@ -1,6 +1,4 @@
 import { useConversation } from '@/contexts/ConversationContext';
-import { supabase } from '@/lib/supabase';
-import { MeshData } from '@shared/types';
 import { useQuery } from '@tanstack/react-query';
 
 export const useMeshData = ({ id }: { id: string }) => {
@@ -10,23 +8,19 @@ export const useMeshData = ({ id }: { id: string }) => {
     queryKey: ['meshData', id],
     enabled: !!id,
     queryFn: async () => {
-      const { data, error } = await supabase
-        .from('meshes')
-        .select('*')
-        .eq('id', id)
-        .limit(1)
-        .single()
-        .overrideTypes<MeshData>();
-
-      if (error) {
-        throw error;
+      const res = await fetch(
+        `${import.meta.env.BASE_URL}/api/meshes/${id}`,
+        { credentials: 'include' },
+      );
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: 'Failed to load mesh' }));
+        throw new Error(err.error);
       }
-
-      return data;
+      return res.json();
     },
     // Poll while pending to ensure UI progresses past 95% as soon as status flips
     refetchInterval: (query) => {
-      const current = query.state.data as MeshData | undefined;
+      const current = query.state.data as { status: string } | undefined;
       return current && current.status === 'pending' ? 3000 : false;
     },
   });
@@ -40,17 +34,20 @@ export const useMeshData = ({ id }: { id: string }) => {
       dataQuery.data.status === 'success',
     queryFn: async () => {
       const fileExtension = dataQuery.data?.file_type || 'glb';
-      const { data, error } = await supabase.storage
-        .from('meshes')
-        .download(
-          `${conversation.user_id}/${conversation.id}/${id}.${fileExtension}`,
-        );
-
-      if (error) {
-        throw error;
+      const storagePath = `${conversation.user_id}/${conversation.id}/${id}.${fileExtension}`;
+      const signedRes = await fetch(
+        `${import.meta.env.BASE_URL}/api/storage?container=meshes&path=${encodeURIComponent(storagePath)}`,
+        { credentials: 'include' },
+      );
+      if (!signedRes.ok) {
+        throw new Error('Failed to get signed URL for mesh');
       }
-
-      return data;
+      const { url: signedUrl } = await signedRes.json();
+      const downloadRes = await fetch(signedUrl);
+      if (!downloadRes.ok) {
+        throw new Error('Failed to download mesh');
+      }
+      return downloadRes.blob();
     },
     refetchOnMount: false,
   });

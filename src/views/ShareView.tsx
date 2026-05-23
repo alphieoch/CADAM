@@ -7,7 +7,6 @@ import { MeshPreview } from '@/components/viewer/MeshPreview';
 import { OpenSCADPreview } from '@/components/viewer/OpenSCADViewer';
 import { ConversationContext } from '@/contexts/ConversationContext';
 import { messageRowToChatMessage } from '@/lib/aiMessages';
-import { supabase } from '@/lib/supabase';
 import { updateParameter } from '@/lib/utils';
 import parseParameters from '@shared/parseParameters';
 import type { AppUIMessage } from '@shared/chatAi';
@@ -45,34 +44,23 @@ export default function ShareView() {
   const { id: conversationId } = useParams({ from: '/_layout/share/$id' });
 
   const { data: conversation, isLoading: isConversationLoading } = useQuery({
-    queryKey: ['conversation', conversationId],
+    queryKey: ['public-conversation', conversationId],
     enabled: !!conversationId,
     queryFn: async () => {
       if (!conversationId) throw new Error('Conversation ID is required');
-      const { data, error } = await supabase
-        .from('conversations')
-        .select('*')
-        .eq('id', conversationId)
-        .limit(1)
-        .single()
-        .overrideTypes<Conversation>();
-      if (error) throw error;
-      return data;
+      const res = await fetch(`/cadam/api/public/conversations/${conversationId}`);
+      if (!res.ok) throw new Error('Failed to load conversation');
+      return res.json() as Promise<Conversation>;
     },
   });
 
   const { data: messages = [], isLoading: areMessagesLoading } = useQuery({
-    queryKey: ['share-messages', conversationId],
+    queryKey: ['public-share-messages', conversationId],
     enabled: !!conversationId && !!conversation,
     queryFn: async () => {
-      const { data, error } = await supabase
-        .from('messages')
-        .select('*')
-        .eq('conversation_id', conversationId)
-        .order('created_at', { ascending: true })
-        .overrideTypes<Message[]>();
-      if (error) throw error;
-      return data ?? [];
+      const res = await fetch(`/cadam/api/public/conversations/${conversationId}/messages`);
+      if (!res.ok) throw new Error('Failed to load messages');
+      return res.json() as Promise<Message[]>;
     },
   });
 
