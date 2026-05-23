@@ -918,11 +918,13 @@ export async function handleAiChatRequest(req: Request) {
     console.log('[aiChat] branchMessages:', JSON.stringify(branchMessages.map(m => ({
       id: m.id,
       role: m.role,
-      parts: m.parts.map((p: { type: string; toolCallId?: string; state?: string; providerExecuted?: boolean }) => ({
+      parts: m.parts.map((p: Record<string, unknown>) => ({
         type: p.type,
         toolCallId: p.toolCallId,
         state: p.state,
         providerExecuted: p.providerExecuted,
+        hasInput: 'input' in p,
+        hasOutput: 'output' in p,
       })),
     })), null, 2));
   }
@@ -963,10 +965,11 @@ export async function handleAiChatRequest(req: Request) {
   if (conversation.type === 'parametric') {
     console.log('[aiChat] modelMessages:', JSON.stringify(modelMessages.map(m => ({
       role: m.role,
-      content: Array.isArray(m.content) ? m.content.map((c: { type: string; toolCallId?: string; toolName?: string }) => ({
-        type: c.type,
-        toolCallId: c.toolCallId,
-        toolName: c.toolName,
+      content: Array.isArray(m.content) ? m.content.map((c) => ({
+        type: (c as { type?: string }).type,
+        toolCallId: (c as { toolCallId?: string }).toolCallId,
+        toolName: (c as { toolName?: string }).toolName,
+        providerExecuted: (c as { providerExecuted?: boolean }).providerExecuted,
       })) : typeof m.content === 'string' ? m.content : '...',
     })), null, 2));
   }

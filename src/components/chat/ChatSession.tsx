@@ -233,8 +233,13 @@ export function ChatSession({
             // preserving it, the backend can't reconstruct the model prompt.
             return {
               ...replacement,
-              providerExecuted: (existing as { providerExecuted?: boolean }).providerExecuted,
-              callProviderMetadata: (existing as { callProviderMetadata?: unknown }).callProviderMetadata,
+              // Force providerExecuted=false so the AI SDK creates a separate
+              // `tool` role message with the tool result. Inline tool-results
+              // (providerExecuted=true) are ignored by the OpenAI provider
+              // converter, which causes OpenAI to reject the request with
+              // "missing tool response".
+              providerExecuted: false,
+              callProviderMetadata: undefined,
             };
           }
           if (
