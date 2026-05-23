@@ -1,6 +1,7 @@
 import { unzipSync } from 'fflate';
 import { env } from './env';
-import { getServiceRoleSupabaseClient } from './supabaseClient';
+import { query } from './dbClient';
+import { uploadBlob } from './storageClient';
 import { isRecord } from './api';
 
 const DEBUG_LOGS =
@@ -24,8 +25,6 @@ function errorName(error: unknown) {
 }
 
 export async function handleFalWebhookRequest(request: Request) {
-  const supabaseClient = getServiceRoleSupabaseClient();
-
   debugLog('=== FAL WEBHOOK CALLED ===');
   debugLog('Webhook request received:', {
     method: request.method,
@@ -52,13 +51,14 @@ export async function handleFalWebhookRequest(request: Request) {
     return new Response('Invalid mesh ID format', { status: 200 });
   }
 
+  const tableName = mode === 'preview' ? 'previews' : 'meshes';
+
   debugLog('=== QUERYING MESH DATA ===');
-  const { data: meshData } = await supabaseClient
-    .from(mode === 'preview' ? 'previews' : 'meshes')
-    .select('*')
-    .eq('id', id)
-    .limit(1)
-    .maybeSingle();
+  const meshResult = await query(
+    `SELECT * FROM ${tableName} WHERE id = $1 LIMIT 1`,
+    [id],
+  );
+  const meshData = meshResult.rows[0];
 
   debugLog('Mesh data found:', {
     found: !!meshData,
@@ -293,31 +293,27 @@ export async function handleFalWebhookRequest(request: Request) {
         ? 'application/octet-stream'
         : 'model/gltf-binary';
 
-    const { error: uploadError } = await supabaseClient.storage
-      .from(mode === 'preview' ? 'previews' : 'meshes')
-      .upload(
-        `${meshData.user_id}/${meshData.conversation_id}/${id}.${fileExtension}`,
-        model,
-        {
-          contentType,
-        },
+    // Upload model to Azure Blob Storage
+    const blobPath = `${meshData.user_id}/${meshData.conversation_id}/${id}.${fileExtension}`;
+    const containerName = mode === 'preview' ? 'previews' : 'meshes';
+    await uploadBlob(
+      containerName,
+      blobPath,
+      Buffer.from(model),
+      contentType,
+    );
+
+    // Update status in Azure PostgreSQL
+    if (mode === 'preview') {
+      await query(
+        `UPDATE previews SET status = 'success' WHERE id = $1`,
+        [id],
       );
-
-    if (uploadError) {
-      throw new Error(uploadError.message);
-    }
-
-    const { error: updateError } = await supabaseClient
-      .from(mode === 'preview' ? 'previews' : 'meshes')
-      .update({
-        status: 'success',
-        ...(mode === 'preview' ? {} : { file_type: fileExtension }),
-      })
-      .eq('id', id);
-
-    if (updateError) {
-      console.error('Failed to update mesh status:', updateError);
-      throw new Error(updateError.message);
+    } else {
+      await query(
+        `UPDATE meshes SET status = 'success', file_type = $1 WHERE id = $2`,
+        [fileExtension, id],
+      );
     }
 
     meshStatus = 'success';
@@ -343,31 +339,24 @@ export async function handleFalWebhookRequest(request: Request) {
 
     meshStatus = 'failure';
 
-    await supabaseClient
-      .from(mode === 'preview' ? 'previews' : 'meshes')
-      .update({
-        status: meshStatus,
-      })
-      .eq('id', id);
+    try {
+      await query(
+        `UPDATE ${tableName} SET status = 'failure' WHERE id = $1`,
+        [id],
+      );
+    } catch (updateErr) {
+      console.error('Failed to update failure status:', updateErr);
+    }
   }
 
-  debugLog('=== SENDING BROADCAST ===');
-  debugLog('Event:', 'mesh-updated');
+  debugLog('=== WEBHOOK COMPLETE ===');
   debugLog('Mesh ID:', id);
+  debugLog('Final status:', meshStatus);
 
-  const channel = supabaseClient.channel(`mesh-updates-${meshData.user_id}`);
-  const broadcastResult = await channel.send({
-    type: 'broadcast',
-    event: 'mesh-updated',
-    payload: {
-      kind: mode === 'preview' ? 'preview' : 'mesh',
-      id,
-      status: meshStatus,
-      conversation_id: meshData.conversation_id,
-    },
-  });
-
-  debugLog('Broadcast result:', broadcastResult);
+  // Note: Supabase real-time broadcast removed. Frontend uses polling
+  // (refetchInterval: 3000ms in useMeshData / useGlbPreview hooks) to
+  // detect status changes. This avoids the Supabase dependency while
+  // maintaining the same user experience.
 
   return new Response(JSON.stringify({ ok: true }), { status: 200 });
 }

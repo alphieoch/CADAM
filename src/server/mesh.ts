@@ -10,12 +10,13 @@ import {
   type GptImageQuality,
 } from './imageGen';
 import { Model, MeshFileType } from '@shared/types';
+import { query } from './dbClient';
 import {
-  getServiceRoleSupabaseClient,
-  type SupabaseClient,
-} from './supabaseClient';
+  uploadBlob,
+  getSignedUrl,
+  getContainerClient,
+} from './storageClient';
 import { getUserFromRequest } from './auth';
-import { reformatSignedUrl } from './messageUtils';
 import { billing, BillingClientError } from './stripeBilling';
 import { logApiError, logError } from './serverLog';
 import { Buffer } from 'node:buffer';
@@ -72,7 +73,6 @@ function runBackgroundTask(task: Promise<unknown>) {
 // make gpt-image-2 edit an image two turns ago while the user is looking
 // at the fallback output.
 async function getPriorImageCallId(
-  supabaseClient: SupabaseClient,
   userId: string,
   conversationId: string,
   preferMeshId: string | undefined,
@@ -83,42 +83,35 @@ async function getPriorImageCallId(
     // RLS. Without this filter, a user could pass another user's mesh UUID
     // to thread the victim's OpenAI multi-turn continuity ID into their own
     // gpt-image-2 call.
-    const { data: meshRow } = await supabaseClient
-      .from('meshes')
-      .select('images')
-      .eq('id', preferMeshId)
-      .eq('user_id', userId)
-      .eq('conversation_id', conversationId)
-      .maybeSingle();
+    const meshResult = await query(
+      'SELECT images FROM meshes WHERE id = $1 AND user_id = $2 AND conversation_id = $3',
+      [preferMeshId, userId, conversationId],
+    );
+    const meshRow = meshResult.rows[0];
     const meshImageIds = Array.isArray(meshRow?.images)
       ? meshRow.images.filter(
           (image): image is string => typeof image === 'string',
         )
       : [];
     if (meshImageIds.length > 0) {
-      const { data } = await supabaseClient
-        .from('images')
-        .select('image_generation_call_id')
-        .in('id', meshImageIds)
-        .eq('user_id', userId)
-        .eq('conversation_id', conversationId)
-        .eq('status', 'success')
-        .order('created_at', { ascending: false })
-        .limit(1);
-      return data?.[0]?.image_generation_call_id ?? null;
+      const imageResult = await query(
+        `SELECT image_generation_call_id FROM images
+         WHERE id = ANY($1) AND user_id = $2 AND conversation_id = $3 AND status = 'success'
+         ORDER BY created_at DESC LIMIT 1`,
+        [meshImageIds, userId, conversationId],
+      );
+      return imageResult.rows[0]?.image_generation_call_id ?? null;
     }
   }
 
-  const { data } = await supabaseClient
-    .from('images')
-    .select('image_generation_call_id')
-    .eq('conversation_id', conversationId)
-    .eq('user_id', userId)
-    .eq('status', 'success')
-    .order('created_at', { ascending: false })
-    .limit(1);
+  const imageResult = await query(
+    `SELECT image_generation_call_id FROM images
+     WHERE conversation_id = $1 AND user_id = $2 AND status = 'success'
+     ORDER BY created_at DESC LIMIT 1`,
+    [conversationId, userId],
+  );
 
-  return data?.[0]?.image_generation_call_id ?? null;
+  return imageResult.rows[0]?.image_generation_call_id ?? null;
 }
 
 // Unified mesh-image generation. Every mesh mode goes through this helper:
@@ -161,7 +154,7 @@ async function generateMeshImage(
   imageCallId: string | null;
   contentType: 'image/jpeg' | 'image/png';
 }> {
-  const supabaseClient = getSupabaseClient();
+  const storageCompat = createStorageCompat();
   const hasFreshUserImages = freshUserImages.length > 0;
   // Skip the call-id lookup when the user is providing fresh reference
   // material — we want gpt-image-2 to anchor on the new upload, not a
@@ -180,7 +173,6 @@ async function generateMeshImage(
     priorImageCallIdStatus = 'suppressed_by_fresh_upload';
   } else {
     priorImageCallId = await getPriorImageCallId(
-      supabaseClient,
       userId,
       conversationId,
       priorMeshId,
@@ -208,7 +200,7 @@ async function generateMeshImage(
 
   try {
     result = await generateImageWithGptImage2(
-      supabaseClient,
+      storageCompat as any,
       getOpenAI(),
       userId,
       conversationId,
@@ -230,7 +222,7 @@ async function generateMeshImage(
     });
     try {
       const imageBytes = await generateImageWithGeminiMultiTurn(
-        supabaseClient,
+        storageCompat as any,
         getGoogleGenAI(),
         userId,
         conversationId,
@@ -252,7 +244,7 @@ async function generateMeshImage(
       });
       try {
         const imageBytes = await generateImageWithFalFlux(
-          supabaseClient,
+          storageCompat as any,
           userId,
           conversationId,
           prompt,
@@ -296,40 +288,38 @@ async function generateMeshImage(
 
 // Helper function to get the most recent mesh preview from the conversation
 async function getRecentMeshPreview(
-  supabaseClient: SupabaseClient,
   userId: string,
   conversationId: string,
 ): Promise<string | null> {
   try {
     // Get the most recent mesh from this conversation
-    const { data: recentMesh, error: meshError } = await supabaseClient
-      .from('meshes')
-      .select('id')
-      .eq('user_id', userId)
-      .eq('conversation_id', conversationId)
-      .eq('status', 'success')
-      .order('created_at', { ascending: false })
-      .limit(1)
-      .single();
+    const meshResult = await query(
+      `SELECT id FROM meshes
+       WHERE user_id = $1 AND conversation_id = $2 AND status = 'success'
+       ORDER BY created_at DESC LIMIT 1`,
+      [userId, conversationId],
+    );
 
-    if (meshError || !recentMesh) {
+    const recentMesh = meshResult.rows[0];
+
+    if (!recentMesh) {
       return null;
     }
 
     // Check if a preview exists for this mesh
-    const { data: previewFiles, error: previewError } =
-      await supabaseClient.storage
-        .from('images')
-        .list(`${userId}/${conversationId}`, {
-          search: `preview-${recentMesh.id}`,
-          limit: 1,
-        });
+    const container = getContainerClient('images');
+    const prefix = `${userId}/${conversationId}/preview-${recentMesh.id}`;
+    const blobs: string[] = [];
+    for await (const blob of container.listBlobsFlat({ prefix })) {
+      blobs.push(blob.name);
+      if (blobs.length >= 1) break;
+    }
 
-    if (previewError || !previewFiles || previewFiles.length === 0) {
+    if (blobs.length === 0) {
       return null;
     }
 
-    return previewFiles[0].name;
+    return blobs[0].split('/').pop() || null;
   } catch (error) {
     console.warn('Failed to get recent mesh preview:', error);
     return null;
@@ -354,10 +344,6 @@ function getGoogleGenAI() {
 
 function getOpenAI() {
   return new OpenAI({ apiKey: requiredEnv('OPENAI_API_KEY') });
-}
-
-function getSupabaseClient() {
-  return getServiceRoleSupabaseClient();
 }
 
 export async function handleMeshRequest(req: Request) {
@@ -430,7 +416,6 @@ export async function handleMeshRequest(req: Request) {
       );
     }
 
-    const supabaseClient = getSupabaseClient();
     ensureFalConfig();
     const appBaseUrl = webhookBaseUrl(req.url);
     const meshReferenceId = crypto.randomUUID();
@@ -558,24 +543,27 @@ export async function handleMeshRequest(req: Request) {
       fileType = 'glb';
     }
 
-    const { data: meshData, error: meshError } = await supabaseClient
-      .from('meshes')
-      .insert({
-        user_id: user.id,
-        images: images ?? null,
-        conversation_id: conversationId,
-        file_type: fileType,
-        prompt: {
-          ...(text && { text: text }),
-          ...(images && images.length > 0 && { images: images }),
-          ...(mesh && { mesh: mesh }),
-          ...(model && { model: model }),
-        },
-      })
-      .select()
-      .single();
-
-    if (meshError) {
+    let meshData;
+    try {
+      const insertResult = await query(
+        `INSERT INTO meshes (user_id, conversation_id, images, file_type, prompt)
+         VALUES ($1, $2, $3, $4, $5)
+         RETURNING *`,
+        [
+          user.id,
+          conversationId,
+          images ?? null,
+          fileType,
+          {
+            ...(text && { text: text }),
+            ...(images && images.length > 0 && { images: images }),
+            ...(mesh && { mesh: mesh }),
+            ...(model && { model: model }),
+          },
+        ],
+      );
+      meshData = insertResult.rows[0];
+    } catch (meshError) {
       logError(meshError, {
         functionName: 'mesh',
         statusCode: 500,
@@ -588,7 +576,35 @@ export async function handleMeshRequest(req: Request) {
         },
       });
       return new Response(
-        JSON.stringify({ error: { message: meshError.message } }),
+        JSON.stringify({
+          error: {
+            message:
+              meshError instanceof Error
+                ? meshError.message
+                : String(meshError),
+          },
+        }),
+        {
+          status: 500,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        },
+      );
+    }
+
+    if (!meshData) {
+      logError(new Error('Failed to insert mesh record'), {
+        functionName: 'mesh',
+        statusCode: 500,
+        userId: user?.id,
+        conversationId,
+        additionalContext: {
+          operation: 'insert_mesh_record',
+          fileType,
+          model,
+        },
+      });
+      return new Response(
+        JSON.stringify({ error: { message: 'Failed to create mesh record' } }),
         {
           status: 500,
           headers: { ...corsHeaders, 'Content-Type': 'application/json' },
@@ -600,7 +616,6 @@ export async function handleMeshRequest(req: Request) {
     if (model !== 'quality') {
       runBackgroundTask(
         submitPreviewJob(
-          supabaseClient,
           text,
           images,
           mesh,
@@ -620,7 +635,6 @@ export async function handleMeshRequest(req: Request) {
 
     runBackgroundTask(
       submitMeshJob(
-        supabaseClient,
         text,
         images,
         mesh,
@@ -664,9 +678,9 @@ export async function handleMeshRequest(req: Request) {
   }
 }
 
+
 // Function that submits a mesh job to fal
 async function submitMeshJob(
-  supabaseClient: SupabaseClient,
   text: string | undefined,
   images: string[] | undefined,
   mesh: string | undefined,
@@ -685,7 +699,7 @@ async function submitMeshJob(
 
   debugLog('Environment variables:', {
     ENVIRONMENT: env('ENVIRONMENT'),
-    SUPABASE_URL: env('VITE_SUPABASE_URL') ? 'SET' : 'NOT SET',
+    DATABASE_URL: env('DATABASE_URL') ? 'SET' : 'NOT SET',
     WEBHOOK_BASE_URL: appBaseUrl ? 'SET' : 'NOT SET',
     appBaseUrl,
   });
@@ -699,53 +713,50 @@ async function submitMeshJob(
     // If mesh is provided, get images of that mesh
     if (mesh) {
       // Get the mesh data to check if it has images
-      const { data: meshData, error: meshDataError } = await supabaseClient
-        .from('meshes')
-        .select('images')
-        .eq('id', mesh)
-        .single();
+      try {
+        const meshResult = await query(
+          'SELECT images FROM meshes WHERE id = $1',
+          [mesh],
+        );
+        const meshData = meshResult.rows[0];
 
-      if (meshDataError) {
-        // If we can't fetch mesh data, just continue without mesh images
-        console.warn(`Failed to fetch mesh data: ${meshDataError.message}`);
-      } else {
-        // If the mesh has images in the images column, use those
-        if (
-          meshData.images &&
-          Array.isArray(meshData.images) &&
-          meshData.images.length > 0
-        ) {
-          // Use the image IDs directly since generateImageWithResponses expects IDs
-          meshImages = meshData.images;
-        } else {
-          // Otherwise, use the preview images from storage
-          // Check if preview images exist in storage
-          const { data: previewImageList, error: previewListError } =
-            await supabaseClient.storage
-              .from('images')
-              .list(`${userId}/${conversationId}`, {
-                search: `preview-${mesh}`,
-              });
+        if (meshData) {
+          // If the mesh has images in the images column, use those
+          if (
+            meshData.images &&
+            Array.isArray(meshData.images) &&
+            meshData.images.length > 0
+          ) {
+            // Use the image IDs directly since generateImageWithResponses expects IDs
+            meshImages = meshData.images;
+          } else {
+            // Otherwise, use the preview images from storage
+            // Check if preview images exist in storage
+            const container = getContainerClient('images');
+            const prefix = `${userId}/${conversationId}/preview-${mesh}`;
+            const blobs: string[] = [];
+            for await (const blob of container.listBlobsFlat({ prefix })) {
+              blobs.push(blob.name);
+            }
 
-          if (previewListError) {
-            // If we can't list preview images, just continue without them
-            console.warn(
-              `Failed to list preview images: ${previewListError.message}`,
-            );
-          } else if (previewImageList && previewImageList.length > 0) {
-            // Just use the preview image filenames - generateImageWithResponses will handle the fallback
-            meshImages = previewImageList.map((file) => file.name);
+            if (blobs.length > 0) {
+              // Just use the preview image filenames - generateImageWithResponses will handle the fallback
+              meshImages = blobs
+                .map((name) => name.split('/').pop()!)
+                .filter(Boolean);
+            }
           }
         }
+      } catch (meshDataError) {
+        // If we can't fetch mesh data, just continue without mesh images
+        console.warn(
+          `Failed to fetch mesh data: ${meshDataError instanceof Error ? meshDataError.message : String(meshDataError)}`,
+        );
       }
     }
 
     // Get the most recent mesh preview for visual continuity
-    const recentMeshPreview = await getRecentMeshPreview(
-      supabaseClient,
-      userId,
-      conversationId,
-    );
+    const recentMeshPreview = await getRecentMeshPreview(userId, conversationId);
 
     // Combine all available images (including recent mesh preview if available)
     const allImages = [...(images || []), ...meshImages];
@@ -761,31 +772,30 @@ async function submitMeshJob(
       // Generate images for standard and textureless models
       if (model === 'quality') {
         // Use Gemini 3 Pro with fallback to Flux for quality model
-        const { data: imageData, error: imageError } = await supabaseClient
-          .from('images')
-          .insert({
-            user_id: userId,
-            conversation_id: conversationId,
-            status: 'pending',
-            prompt: {
+        const imageInsertResult = await query(
+          `INSERT INTO images (user_id, conversation_id, status, prompt)
+           VALUES ($1, $2, 'pending', $3)
+           RETURNING *`,
+          [
+            userId,
+            conversationId,
+            {
               ...(text && { text: text }),
               ...(allImages.length > 0 && { images: allImages }),
               ...(model && { model: model }),
             },
-          })
-          .select()
-          .single();
+          ],
+        );
+        const imageData = imageInsertResult.rows[0];
 
-        if (imageError) {
-          throw new Error(imageError.message);
+        if (!imageData) {
+          throw new Error('Failed to insert image record');
         }
 
-        await supabaseClient
-          .from('meshes')
-          .update({
-            images: [imageData.id],
-          })
-          .eq('id', meshId);
+        await query('UPDATE meshes SET images = $1 WHERE id = $2', [
+          [imageData.id],
+          meshId,
+        ]);
 
         const newPrompt =
           allImages.length > 0
@@ -803,64 +813,51 @@ async function submitMeshJob(
             { meshModel: 'quality' },
           );
 
-        const { error: imageUploadError } = await supabaseClient.storage
-          .from('images')
-          .upload(`${userId}/${conversationId}/${imageData.id}`, imageBytes, {
-            contentType,
-          });
+        await uploadBlob(
+          'images',
+          `${userId}/${conversationId}/${imageData.id}`,
+          imageBytes,
+          contentType,
+        );
 
-        if (imageUploadError) {
-          throw new Error(imageUploadError.message);
-        }
+        await query(
+          `UPDATE images SET status = 'success', image_generation_call_id = $1 WHERE id = $2`,
+          [imageCallId, imageData.id],
+        );
 
-        await supabaseClient
-          .from('images')
-          .update({
-            status: 'success',
-            image_generation_call_id: imageCallId,
-          })
-          .eq('id', imageData.id);
+        const imageUrl = await getSignedUrl(
+          'images',
+          `${userId}/${conversationId}/${imageData.id}`,
+          60,
+        );
 
-        const { data: imageSignedUrl, error: imageSignedUrlError } =
-          await supabaseClient.storage
-            .from('images')
-            .createSignedUrl(
-              `${userId}/${conversationId}/${imageData.id}`,
-              60 * 60,
-            );
-
-        if (imageSignedUrlError) {
-          throw new Error(imageSignedUrlError.message);
-        }
-
-        imageInputs = [reformatSignedUrl(imageSignedUrl.signedUrl)];
+        imageInputs = [imageUrl];
       } else {
         // Standard single-image generation for fast mode
-        const { data: imageData, error: imageError } = await supabaseClient
-          .from('images')
-          .insert({
-            user_id: userId,
-            conversation_id: conversationId,
-            status: 'pending',
-            prompt: {
+        const imageInsertResult = await query(
+          `INSERT INTO images (user_id, conversation_id, status, prompt)
+           VALUES ($1, $2, 'pending', $3)
+           RETURNING *`,
+          [
+            userId,
+            conversationId,
+            {
               ...(text && { text: text }),
               ...(allImages.length > 0 && { images: allImages }),
               ...(model && { model: model }),
             },
-          })
-          .select()
-          .single();
+          ],
+        );
+        const imageData = imageInsertResult.rows[0];
 
-        if (imageError) {
-          throw new Error(imageError.message);
+        if (!imageData) {
+          throw new Error('Failed to insert image record');
         }
 
-        await supabaseClient
-          .from('meshes')
-          .update({
-            images: [imageData.id],
-          })
-          .eq('id', meshId);
+        await query('UPDATE meshes SET images = $1 WHERE id = $2', [
+          [imageData.id],
+          meshId,
+        ]);
 
         const newPrompt =
           allImages.length > 0
@@ -878,37 +875,25 @@ async function submitMeshJob(
             { meshModel: 'fast' },
           );
 
-        const { error: imageUploadError } = await supabaseClient.storage
-          .from('images')
-          .upload(`${userId}/${conversationId}/${imageData.id}`, imageBytes, {
-            contentType,
-          });
+        await uploadBlob(
+          'images',
+          `${userId}/${conversationId}/${imageData.id}`,
+          imageBytes,
+          contentType,
+        );
 
-        if (imageUploadError) {
-          throw new Error(imageUploadError.message);
-        }
+        await query(
+          `UPDATE images SET status = 'success', image_generation_call_id = $1 WHERE id = $2`,
+          [imageCallId, imageData.id],
+        );
 
-        await supabaseClient
-          .from('images')
-          .update({
-            status: 'success',
-            image_generation_call_id: imageCallId,
-          })
-          .eq('id', imageData.id);
+        const imageUrl = await getSignedUrl(
+          'images',
+          `${userId}/${conversationId}/${imageData.id}`,
+          60,
+        );
 
-        const { data: imageSignedUrl, error: imageSignedUrlError } =
-          await supabaseClient.storage
-            .from('images')
-            .createSignedUrl(
-              `${userId}/${conversationId}/${imageData.id}`,
-              60 * 60,
-            );
-
-        if (imageSignedUrlError) {
-          throw new Error(imageSignedUrlError.message);
-        }
-
-        imageInputs = [reformatSignedUrl(imageSignedUrl.signedUrl)];
+        imageInputs = [imageUrl];
       }
     } else {
       // No text provided, use the collected images directly for mesh generation
@@ -919,19 +904,21 @@ async function submitMeshJob(
       const imageFiles = allImages.map(
         (image: string) => `${userId}/${conversationId}/${image}`,
       );
-      const { data: imageSignedUrls, error: imageSignedUrlsError } =
-        await supabaseClient.storage
-          .from('images')
-          .createSignedUrls(imageFiles, 60 * 60);
+      const imageSignedUrls = await Promise.all(
+        imageFiles.map(async (path) => {
+          try {
+            const url = await getSignedUrl('images', path, 60);
+            return { signedUrl: url, error: null };
+          } catch (err) {
+            return { signedUrl: undefined, error: err };
+          }
+        }),
+      );
 
-      if (imageSignedUrlsError) {
-        throw new Error(imageSignedUrlsError.message);
-      }
-
-      // Filter out any errors and map to just get signedURL, swap out basename for supabase host
+      // Filter out any errors and map to just get signedURL
       imageInputs = imageSignedUrls
         .filter((image) => !image.error && image.signedUrl)
-        .map((image) => reformatSignedUrl(image.signedUrl));
+        .map((image) => image.signedUrl!);
 
       if (imageInputs.length === 0) {
         throw new Error('No valid images found for mesh generation');
@@ -952,20 +939,12 @@ async function submitMeshJob(
 
       // Check if this is first generation or conversational edit by looking for COMPLETED meshes (not images)
       // This properly handles branching - a branch won't have completed meshes
-      const { data: existingCompletedMeshes, error: meshesError } =
-        await supabaseClient
-          .from('meshes')
-          .select('id')
-          .eq('conversation_id', conversationId)
-          .eq('user_id', userId)
-          .eq('status', 'success');
+      const existingCompletedMeshes = await query(
+        `SELECT id FROM meshes WHERE conversation_id = $1 AND user_id = $2 AND status = 'success'`,
+        [conversationId, userId],
+      );
 
-      if (meshesError) {
-        throw new Error(meshesError.message);
-      }
-
-      const isFirstGeneration =
-        !existingCompletedMeshes || existingCompletedMeshes.length === 0;
+      const isFirstGeneration = existingCompletedMeshes.rows.length === 0;
       const hasUploadedImages = allImages.length > 0;
       const hasText = text && text.trim() !== '';
 
@@ -979,31 +958,30 @@ async function submitMeshJob(
       }
 
       // Create image record
-      const { data: imageData, error: imageError } = await supabaseClient
-        .from('images')
-        .insert({
-          user_id: userId,
-          conversation_id: conversationId,
-          status: 'pending',
-          prompt: {
+      const imageInsertResult = await query(
+        `INSERT INTO images (user_id, conversation_id, status, prompt)
+         VALUES ($1, $2, 'pending', $3)
+         RETURNING *`,
+        [
+          userId,
+          conversationId,
+          {
             ...(text && { text: text }),
             ...(allImages.length > 0 && { images: allImages }),
             ...(model && { model: model }),
           },
-        })
-        .select()
-        .single();
+        ],
+      );
+      const imageData = imageInsertResult.rows[0];
 
-      if (imageError) {
-        throw new Error(imageError.message);
+      if (!imageData) {
+        throw new Error('Failed to insert image record');
       }
 
-      await supabaseClient
-        .from('meshes')
-        .update({
-          images: [imageData.id],
-        })
-        .eq('id', meshId);
+      await query('UPDATE meshes SET images = $1 WHERE id = $2', [
+        [imageData.id],
+        meshId,
+      ]);
 
       // Use the shared INSTRUCTIONS_3D preamble (imported as instructions3D).
 
@@ -1040,38 +1018,24 @@ async function submitMeshJob(
       );
 
       // Upload the generated base image
-      const { error: imageUploadError } = await supabaseClient.storage
-        .from('images')
-        .upload(`${userId}/${conversationId}/${imageData.id}`, imageBytes, {
-          contentType,
-        });
+      await uploadBlob(
+        'images',
+        `${userId}/${conversationId}/${imageData.id}`,
+        imageBytes,
+        contentType,
+      );
 
-      if (imageUploadError) {
-        throw new Error(imageUploadError.message);
-      }
-
-      await supabaseClient
-        .from('images')
-        .update({
-          status: 'success',
-          image_generation_call_id: imageCallId,
-        })
-        .eq('id', imageData.id);
+      await query(
+        `UPDATE images SET status = 'success', image_generation_call_id = $1 WHERE id = $2`,
+        [imageCallId, imageData.id],
+      );
 
       // Get signed URL for the base image to send to Meshy
-      const { data: imageSignedUrl, error: imageSignedUrlError } =
-        await supabaseClient.storage
-          .from('images')
-          .createSignedUrl(
-            `${userId}/${conversationId}/${imageData.id}`,
-            60 * 60,
-          );
-
-      if (imageSignedUrlError) {
-        throw new Error(imageSignedUrlError.message);
-      }
-
-      const baseImageUrl = reformatSignedUrl(imageSignedUrl.signedUrl);
+      const baseImageUrl = await getSignedUrl(
+        'images',
+        `${userId}/${conversationId}/${imageData.id}`,
+        60,
+      );
 
       // Configure Meshy parameters
       // Topology: default to triangle (Meshy standard), but respect quad if requested
@@ -1389,28 +1353,17 @@ Output:`;
       requestData: { meshId, model, meshTopology, polygonCount },
     });
 
-    await supabaseClient
-      .from('meshes')
-      .update({ status: 'failure' })
-      .eq('id', meshId);
-
-    const channel = supabaseClient.channel(`mesh-updates-${userId}`);
-    await channel.send({
-      type: 'broadcast',
-      event: 'mesh-updated',
-      payload: {
-        kind: 'mesh',
-        id: meshId,
-        status: 'failure',
-        conversation_id: conversationId,
-      },
+    await query("UPDATE meshes SET status = 'failure' WHERE id = $1", [
+      meshId,
+    ]).catch((err) => {
+      console.error('Failed to update mesh failure status:', err);
     });
   }
 }
 
+
 // Function that submits a mesh job to fal
 async function submitPreviewJob(
-  supabaseClient: SupabaseClient,
   text: string | undefined,
   images: string[] | undefined,
   mesh: string | undefined,
@@ -1426,18 +1379,16 @@ async function submitPreviewJob(
   let previewId: string | null = null;
 
   try {
-    const { data: previewData, error: previewError } = await supabaseClient
-      .from('previews')
-      .insert({
-        user_id: userId,
-        conversation_id: conversationId,
-        mesh_id: meshId,
-      })
-      .select()
-      .single();
+    const previewInsertResult = await query(
+      `INSERT INTO previews (user_id, conversation_id, mesh_id)
+       VALUES ($1, $2, $3)
+       RETURNING *`,
+      [userId, conversationId, meshId],
+    );
+    const previewData = previewInsertResult.rows[0];
 
-    if (previewError) {
-      throw new Error(previewError.message);
+    if (!previewData) {
+      throw new Error('Failed to insert preview record');
     }
 
     previewId = previewData.id;
@@ -1448,44 +1399,45 @@ async function submitPreviewJob(
     // If mesh is provided, get images of that mesh
     if (mesh) {
       // Get the mesh data to check if it has images
-      const { data: meshData, error: meshDataError } = await supabaseClient
-        .from('meshes')
-        .select('images')
-        .eq('id', mesh)
-        .single();
+      try {
+        const meshResult = await query(
+          'SELECT images FROM meshes WHERE id = $1',
+          [mesh],
+        );
+        const meshData = meshResult.rows[0];
 
-      if (meshDataError) {
-        // If we can't fetch mesh data, just continue without mesh images
-        console.warn(`Failed to fetch mesh data: ${meshDataError.message}`);
-      } else {
-        // If the mesh has images in the images column, use those
-        if (
-          meshData.images &&
-          Array.isArray(meshData.images) &&
-          meshData.images.length > 0
-        ) {
-          // Use the image IDs directly since generateImageWithResponses expects IDs
-          meshImages = meshData.images;
-        } else {
-          // Otherwise, use the preview images from storage
-          // Check if preview images exist in storage
-          const { data: previewImageList, error: previewListError } =
-            await supabaseClient.storage
-              .from('images')
-              .list(`${userId}/${conversationId}`, {
-                search: `preview-${mesh}`,
-              });
+        if (meshData) {
+          // If the mesh has images in the images column, use those
+          if (
+            meshData.images &&
+            Array.isArray(meshData.images) &&
+            meshData.images.length > 0
+          ) {
+            // Use the image IDs directly since generateImageWithResponses expects IDs
+            meshImages = meshData.images;
+          } else {
+            // Otherwise, use the preview images from storage
+            // Check if preview images exist in storage
+            const container = getContainerClient('images');
+            const prefix = `${userId}/${conversationId}/preview-${mesh}`;
+            const blobs: string[] = [];
+            for await (const blob of container.listBlobsFlat({ prefix })) {
+              blobs.push(blob.name);
+            }
 
-          if (previewListError) {
-            // If we can't list preview images, just continue without them
-            console.warn(
-              `Failed to list preview images: ${previewListError.message}`,
-            );
-          } else if (previewImageList && previewImageList.length > 0) {
-            // Just use the preview image filenames - generateImageWithResponses will handle the fallback
-            meshImages = previewImageList.map((file) => file.name);
+            if (blobs.length > 0) {
+              // Just use the preview image filenames - generateImageWithResponses will handle the fallback
+              meshImages = blobs
+                .map((name) => name.split('/').pop()!)
+                .filter(Boolean);
+            }
           }
         }
+      } catch (meshDataError) {
+        // If we can't fetch mesh data, just continue without mesh images
+        console.warn(
+          `Failed to fetch mesh data: ${meshDataError instanceof Error ? meshDataError.message : String(meshDataError)}`,
+        );
       }
     }
 
@@ -1503,7 +1455,7 @@ async function submitPreviewJob(
           : `Generate a new image: ${text} Style: ${imageGuidance}`;
 
       const imageBytes = await generateImageWithFalFlux(
-        supabaseClient,
+        createStorageCompat() as any,
         userId,
         conversationId,
         newPrompt,
@@ -1512,26 +1464,20 @@ async function submitPreviewJob(
 
       const imageId = crypto.randomUUID();
 
-      const { error: imageUploadError } = await supabaseClient.storage
-        .from('images')
-        .upload(`${userId}/${conversationId}/${imageId}`, imageBytes, {
-          contentType: 'image/png',
-        });
+      await uploadBlob(
+        'images',
+        `${userId}/${conversationId}/${imageId}`,
+        imageBytes,
+        'image/png',
+      );
 
-      if (imageUploadError) {
-        throw new Error(imageUploadError.message);
-      }
+      const imageUrl = await getSignedUrl(
+        'images',
+        `${userId}/${conversationId}/${imageId}`,
+        60,
+      );
 
-      const { data: imageSignedUrl, error: imageSignedUrlError } =
-        await supabaseClient.storage
-          .from('images')
-          .createSignedUrl(`${userId}/${conversationId}/${imageId}`, 60 * 60);
-
-      if (imageSignedUrlError) {
-        throw new Error(imageSignedUrlError.message);
-      }
-
-      imageInputs = [reformatSignedUrl(imageSignedUrl.signedUrl)];
+      imageInputs = [imageUrl];
     } else {
       // No text provided, use the collected images directly for mesh generation
       if (allImages.length === 0) {
@@ -1541,19 +1487,21 @@ async function submitPreviewJob(
       const imageFiles = allImages.map(
         (image: string) => `${userId}/${conversationId}/${image}`,
       );
-      const { data: imageSignedUrls, error: imageSignedUrlsError } =
-        await supabaseClient.storage
-          .from('images')
-          .createSignedUrls(imageFiles, 60 * 60);
+      const imageSignedUrls = await Promise.all(
+        imageFiles.map(async (path) => {
+          try {
+            const url = await getSignedUrl('images', path, 60);
+            return { signedUrl: url, error: null };
+          } catch (err) {
+            return { signedUrl: undefined, error: err };
+          }
+        }),
+      );
 
-      if (imageSignedUrlsError) {
-        throw new Error(imageSignedUrlsError.message);
-      }
-
-      // Filter out any errors and map to just get signedURL, swap out basename for supabase host
+      // Filter out any errors and map to just get signedURL
       imageInputs = imageSignedUrls
         .filter((image) => !image.error && image.signedUrl)
-        .map((image) => reformatSignedUrl(image.signedUrl));
+        .map((image) => image.signedUrl!);
 
       if (imageInputs.length === 0) {
         throw new Error('No valid images found for mesh generation');
@@ -1581,10 +1529,12 @@ async function submitPreviewJob(
     });
     console.error(error);
     if (previewId) {
-      supabaseClient
-        .from('previews')
-        .update({ status: 'failure' })
-        .eq('id', previewId);
+      query(
+        "UPDATE previews SET status = 'failure' WHERE id = $1",
+        [previewId],
+      ).catch((err) => {
+        console.error('Failed to update preview failure status:', err);
+      });
     }
   }
   // Don't need to send update to channel because it's not a mesh we care about
@@ -1599,21 +1549,18 @@ async function createHunyuanPreview(
   meshId: string,
   appBaseUrl: string,
 ): Promise<void> {
-  const supabaseClient = getSupabaseClient();
   ensureFalConfig();
   try {
-    const { data: previewData, error: previewError } = await supabaseClient
-      .from('previews')
-      .insert({
-        user_id: userId,
-        conversation_id: conversationId,
-        mesh_id: meshId,
-      })
-      .select()
-      .single();
+    const previewInsertResult = await query(
+      `INSERT INTO previews (user_id, conversation_id, mesh_id)
+       VALUES ($1, $2, $3)
+       RETURNING *`,
+      [userId, conversationId, meshId],
+    );
+    const previewData = previewInsertResult.rows[0];
 
-    if (previewError) {
-      debugLog(`Failed to create preview record: ${previewError.message}`);
+    if (!previewData) {
+      debugLog('Failed to create preview record: no row returned');
       return;
     }
 
@@ -1632,4 +1579,81 @@ async function createHunyuanPreview(
       `Error creating Hunyuan preview: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
+}
+
+// Compatibility wrapper that exposes a Supabase-storage-like API backed by
+// Azure Blob Storage. This lets imageGen.ts helpers (which still expect a
+// Supabase client) work in Azure-native mode without crashing.
+function createStorageCompat() {
+  return {
+    storage: {
+      from(bucket: string) {
+        return {
+          async download(path: string) {
+            try {
+              const container = getContainerClient(bucket);
+              const blockBlob = container.getBlockBlobClient(path);
+              const [buffer, properties] = await Promise.all([
+                blockBlob.downloadToBuffer(),
+                blockBlob.getProperties(),
+              ]);
+              return {
+                data: {
+                  type: properties.contentType || 'image/png',
+                  async arrayBuffer() {
+                    return buffer.buffer.slice(
+                      buffer.byteOffset,
+                      buffer.byteOffset + buffer.byteLength,
+                    );
+                  },
+                },
+                error: null,
+              };
+            } catch (err) {
+              return { data: null, error: err };
+            }
+          },
+          async exists(path: string) {
+            try {
+              const container = getContainerClient(bucket);
+              const blockBlob = container.getBlockBlobClient(path);
+              const exists = await blockBlob.exists();
+              return { data: exists, error: null };
+            } catch (err) {
+              return { data: false, error: err };
+            }
+          },
+          async createSignedUrl(path: string, expirySeconds: number) {
+            try {
+              const url = await getSignedUrl(
+                bucket,
+                path,
+                Math.ceil(expirySeconds / 60),
+              );
+              return { data: { signedUrl: url }, error: null };
+            } catch (err) {
+              return { data: null, error: err };
+            }
+          },
+          async createSignedUrls(paths: string[], expirySeconds: number) {
+            const results = await Promise.all(
+              paths.map(async (path) => {
+                try {
+                  const url = await getSignedUrl(
+                    bucket,
+                    path,
+                    Math.ceil(expirySeconds / 60),
+                  );
+                  return { signedUrl: url, error: null };
+                } catch (err) {
+                  return { signedUrl: undefined, error: err };
+                }
+              }),
+            );
+            return { data: results, error: null };
+          },
+        };
+      },
+    },
+  };
 }
