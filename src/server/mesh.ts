@@ -385,7 +385,6 @@ export async function handleMeshRequest(req: Request) {
     // Authenticate user using JWT cookie
     debugLog('=== AUTHENTICATING USER ===');
     const user = await getUserFromRequest(req);
-    const supabaseClient = getSupabaseClient();
     if (!user?.id || !user.email) {
       logError(new Error('No user found in JWT cookie'), {
         functionName: 'mesh',
@@ -431,6 +430,7 @@ export async function handleMeshRequest(req: Request) {
       );
     }
 
+    const supabaseClient = getSupabaseClient();
     ensureFalConfig();
     const appBaseUrl = webhookBaseUrl(req.url);
     const meshReferenceId = crypto.randomUUID();

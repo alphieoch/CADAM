@@ -47,7 +47,7 @@ export const DeleteAccountDialog = ({
         body: JSON.stringify({ reason: selectedReason }),
       });
     },
-    onSuccess: () => {
+    onSuccess: async () => {
       // Sign out via API and redirect after deletion
       await fetch(`${import.meta.env.BASE_URL}/api/auth/logout`, {
         method: 'POST',

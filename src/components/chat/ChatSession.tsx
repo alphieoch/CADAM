@@ -233,7 +233,7 @@ export function ChatSession({
             // preserving it, the backend can't reconstruct the model prompt.
             return {
               ...replacement,
-              providerExecuted: true,
+              providerExecuted: (existing as { providerExecuted?: boolean }).providerExecuted,
               callProviderMetadata: (existing as { callProviderMetadata?: unknown }).callProviderMetadata,
             };
           }

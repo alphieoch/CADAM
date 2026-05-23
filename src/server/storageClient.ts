@@ -1,4 +1,4 @@
-import { BlobServiceClient } from '@azure/storage-blob';
+import { BlobServiceClient, BlobSASPermissions, SASProtocol } from '@azure/storage-blob';
 import { env, requiredEnv } from './env';
 
 let blobServiceClient: BlobServiceClient | undefined;
@@ -57,9 +57,9 @@ export async function getSignedUrl(
   const expiresOn = new Date();
   expiresOn.setMinutes(expiresOn.getMinutes() + expiryMinutes);
   const sasUrl = await blockBlob.generateSasUrl({
-    permissions: 'r',
+    permissions: BlobSASPermissions.parse('r'),
     expiresOn,
-    protocol: 'https',
+    protocol: SASProtocol.Https,
   });
   return sasUrl;
 }
