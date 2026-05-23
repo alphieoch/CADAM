@@ -227,17 +227,15 @@ export function ChatSession({
             existing.type === 'tool-build_parametric_model' &&
             existing.toolCallId === toolCall.toolCallId
           ) {
-            // Carry forward `callProviderMetadata` from the model-emitted
-            // tool-call (Gemini 3 stashes its `thoughtSignature` there).
-            // Without it the next server-side turn echoes the functionCall
-            // back to Gemini without a signature and Gemini rejects the
-            // request with "Function call is missing a thought_signature".
-            return existing.callProviderMetadata
-              ? {
-                  ...replacement,
-                  callProviderMetadata: existing.callProviderMetadata,
-                }
-              : replacement;
+            // Preserve provider-specific metadata so the server-side
+            // convertToModelMessages can correctly pair tool calls with
+            // results. Azure OpenAI sets providerExecuted=true; without
+            // preserving it, the backend can't reconstruct the model prompt.
+            return {
+              ...replacement,
+              providerExecuted: (existing as { providerExecuted?: boolean }).providerExecuted,
+              callProviderMetadata: (existing as { callProviderMetadata?: unknown }).callProviderMetadata,
+            };
           }
           if (
             (existing.type === 'reasoning' || existing.type === 'text') &&

@@ -913,6 +913,20 @@ export async function handleAiChatRequest(req: Request) {
   // the very first user turn.
   const isFirstUserTurn = branchMessages.length === 1 && leafRole === 'user';
 
+  // Debug logging for parametric chat tool result issues
+  if (conversation.type === 'parametric') {
+    console.log('[aiChat] branchMessages:', JSON.stringify(branchMessages.map(m => ({
+      id: m.id,
+      role: m.role,
+      parts: m.parts.map((p: { type: string; toolCallId?: string; state?: string; providerExecuted?: boolean }) => ({
+        type: p.type,
+        toolCallId: p.toolCallId,
+        state: p.state,
+        providerExecuted: p.providerExecuted,
+      })),
+    })), null, 2));
+  }
+
   const modelMessages = await convertToModelMessages<AppUIMessage>(
     branchMessages,
     {
@@ -944,6 +958,18 @@ export async function handleAiChatRequest(req: Request) {
       },
     },
   );
+
+  // Debug logging for parametric chat tool result issues
+  if (conversation.type === 'parametric') {
+    console.log('[aiChat] modelMessages:', JSON.stringify(modelMessages.map(m => ({
+      role: m.role,
+      content: Array.isArray(m.content) ? m.content.map((c: { type: string; toolCallId?: string; toolName?: string }) => ({
+        type: c.type,
+        toolCallId: c.toolCallId,
+        toolName: c.toolName,
+      })) : typeof m.content === 'string' ? m.content : '...',
+    })), null, 2));
+  }
 
   // Resolve the actual model ID the request will run against. For
   // `creative` conversations this is hardcoded to Sonnet regardless of
