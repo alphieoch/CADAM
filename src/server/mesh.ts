@@ -17,6 +17,11 @@ import {
   downloadGlb,
   generateMeshWithKrea,
 } from './krea3d';
+import {
+  generateImageWithKrea,
+  enhanceImageWithKrea,
+  type KreaImageModel,
+} from './kreaImage';
 
 import { Model, MeshFileType } from '@shared/types';
 import { query } from './dbClient';
@@ -132,39 +137,113 @@ async function getPriorImageCallId(
   return imageResult.rows[0]?.image_generation_call_id ?? null;
 }
 
-// Unified mesh-image generation. Every mesh mode goes through this helper:
-//   1. Primary: gpt-image-2 via OpenAI Responses API (canonical per OpenAI
-//      docs, supports multi-turn via image_generation_call id)
-//   2. Fallback 1: Gemini 3 Pro Image Preview (nano banana pro)
-//   3. Fallback 2: Flux (fal-ai)
-//
-// Flux is also the sole provider for mesh previews (see submitPreviewJob),
-// which intentionally does not go through this chain.
-// Per-mode gpt-image-2 quality. fast mode defaults to `low` ($0.006/image,
-// cheaper than the Flux it replaced) since fast-mode output is inherently
-// draft quality. quality/ultra use `high` ($0.21/image) for final seed
-// fidelity. See https://developers.openai.com/api/docs/guides/image-generation
-// for pricing tiers.
-const QUALITY_BY_MESH_MODEL: Record<
+// Krea image models by quality tier for 3D seed generation
+const KREA_IMAGE_MODEL_BY_TIER: Record<
   'fast' | 'quality' | 'ultra',
-  GptImageQuality
+  KreaImageModel
 > = {
-  fast: 'low',
-  quality: 'high',
-  ultra: 'high',
+  fast: 'imagen-4-fast',
+  quality: 'imagen-4-ultra',
+  ultra: 'nano-banana-pro',
 };
 
+// Whether to apply Topaz enhancement after generation
+const KREA_ENHANCE_BY_TIER: Record<'fast' | 'quality' | 'ultra', boolean> = {
+  fast: false,
+  quality: true,
+  ultra: true,
+};
+
+// Target resolution for enhancement (2x the generation size)
+const KREA_ENHANCE_SIZE: Record<'fast' | 'quality' | 'ultra', number> = {
+  fast: 1024,
+  quality: 2048,
+  ultra: 2048,
+};
+
+/**
+ * Generate a seed image for 3D mesh generation using Krea's API.
+ * Primary: Krea image generation (Imagen 4 / Nano Banana)
+ * Optional: Krea Topaz enhancement for quality/ultra tiers
+ * Fallback: Grok → GPT Image 2 → Gemini → Flux (legacy chain)
+ */
 async function generateMeshImage(
   userId: string,
   conversationId: string,
   prompt: string,
-  // Fresh references uploaded in *this* turn — take precedence for base64.
   freshUserImages: string[],
-  // All available reference images in the conversation (includes mesh
-  // previews and prior mesh images) — used when no fresh upload.
   allImages: string[],
-  // The specific mesh the user is editing from (branch anchor), if any.
-  // Makes the multi-turn lookup branch-aware.
+  priorMeshId: string | undefined,
+  sentryStage: { meshModel: 'fast' | 'quality' | 'ultra'; subStage?: string },
+): Promise<{
+  imageBytes: Buffer;
+  imageCallId: string | null;
+  contentType: 'image/jpeg' | 'image/png';
+}> {
+  const tier = sentryStage.meshModel;
+  const kreaModel = KREA_IMAGE_MODEL_BY_TIER[tier];
+  const shouldEnhance = KREA_ENHANCE_BY_TIER[tier];
+  const enhanceSize = KREA_ENHANCE_SIZE[tier];
+
+  // Try Krea image generation first
+  try {
+    debugLog(`[mesh] Krea image gen: model=${kreaModel} tier=${tier}`);
+    let imageBytes = await generateImageWithKrea(prompt, kreaModel, {
+      width: 1024,
+      height: 1024,
+    });
+
+    // Apply Topaz enhancement for quality/ultra tiers
+    if (shouldEnhance) {
+      debugLog(`[mesh] Krea Topaz enhance: ${enhanceSize}x${enhanceSize}`);
+      // Upload to Krea assets first to get a URL for enhancement
+      const tmpAssetUrl = await uploadKreaAsset(imageBytes, 'image/png');
+      imageBytes = await enhanceImageWithKrea(tmpAssetUrl, {
+        width: enhanceSize,
+        height: enhanceSize,
+        model: tier === 'ultra' ? 'High Fidelity V2' : 'Standard V2',
+      });
+    }
+
+    // Krea returns PNG
+    return { imageBytes, imageCallId: null, contentType: 'image/png' };
+  } catch (kreaError) {
+    logError(kreaError, {
+      functionName: 'mesh',
+      statusCode: 500,
+      userId,
+      conversationId,
+      additionalContext: {
+        stage: 'krea_image_fallback',
+        tier,
+        kreaModel,
+        ...sentryStage,
+      },
+    });
+
+    // Fallback to legacy chain
+    return generateMeshImageLegacy(
+      userId,
+      conversationId,
+      prompt,
+      freshUserImages,
+      allImages,
+      priorMeshId,
+      sentryStage,
+    );
+  }
+}
+
+/**
+ * Legacy fallback image generation chain.
+ * Kept for resilience if Krea image API is unavailable.
+ */
+async function generateMeshImageLegacy(
+  userId: string,
+  conversationId: string,
+  prompt: string,
+  freshUserImages: string[],
+  allImages: string[],
   priorMeshId: string | undefined,
   sentryStage: { meshModel: 'fast' | 'quality' | 'ultra'; subStage?: string },
 ): Promise<{
@@ -174,53 +253,21 @@ async function generateMeshImage(
 }> {
   const storageCompat = createStorageCompat();
   const hasFreshUserImages = freshUserImages.length > 0;
-  // Skip the call-id lookup when the user is providing fresh reference
-  // material — we want gpt-image-2 to anchor on the new upload, not a
-  // prior turn's output.
   let priorImageCallId: string | null;
-  // Tri-state for observability so Sentry breadcrumbs distinguish
-  // "threaded a prior id", "no prior existed" (or prior was a fallback),
-  // and "prior existed but we suppressed it because the user uploaded
-  // fresh reference material this turn".
-  let priorImageCallIdStatus:
-    | 'threaded'
-    | 'none_available'
-    | 'suppressed_by_fresh_upload';
   if (hasFreshUserImages) {
     priorImageCallId = null;
-    priorImageCallIdStatus = 'suppressed_by_fresh_upload';
   } else {
     priorImageCallId = await getPriorImageCallId(
       userId,
       conversationId,
       priorMeshId,
     );
-    priorImageCallIdStatus =
-      priorImageCallId !== null ? 'threaded' : 'none_available';
   }
   const gptImageReferenceImages = hasFreshUserImages
     ? freshUserImages
     : allImages;
 
-  const sentryContext = {
-    functionName: 'mesh' as const,
-    statusCode: 500,
-    userId,
-    conversationId,
-  };
-
-  let provider:
-    | 'grok-imagine'
-    | 'gpt-image-2'
-    | 'nano-banana-pro'
-    | 'flux';
-  let result: {
-    imageBytes: Buffer;
-    imageCallId: string | null;
-    contentType: 'image/jpeg' | 'image/png';
-  };
-
-  // Try Grok Imagine first (cheapest and fastest for 3D seed images)
+  // Try Grok Imagine first
   try {
     const imageBytes = await generateImageWithGrok(
       storageCompat as any,
@@ -229,21 +276,11 @@ async function generateMeshImage(
       prompt,
       gptImageReferenceImages,
     );
-    // Grok Imagine returns JPEG via the b64_json path.
-    result = { imageBytes, imageCallId: null, contentType: 'image/jpeg' };
-    provider = 'grok-imagine';
-  } catch (grokError) {
-    logError(grokError, {
-      ...sentryContext,
-      additionalContext: {
-        stage: 'grok_imagine_fallback',
-        hasFreshUserImages,
-        priorImageCallIdStatus,
-        ...sentryStage,
-      },
-    });
+    return { imageBytes, imageCallId: null, contentType: 'image/jpeg' };
+  } catch {
+    // Fallback to GPT Image 2
     try {
-      result = await generateImageWithGptImage2(
+      const result = await generateImageWithGptImage2(
         storageCompat as any,
         getOpenAI(),
         userId,
@@ -251,19 +288,11 @@ async function generateMeshImage(
         prompt,
         gptImageReferenceImages,
         priorImageCallId,
-        QUALITY_BY_MESH_MODEL[sentryStage.meshModel],
+        'high',
       );
-      provider = 'gpt-image-2';
-    } catch (gptImageError) {
-      logError(gptImageError, {
-        ...sentryContext,
-        additionalContext: {
-          stage: 'gpt_image_2_fallback',
-          hasFreshUserImages,
-          priorImageCallIdStatus,
-          ...sentryStage,
-        },
-      });
+      return result;
+    } catch {
+      // Fallback to Gemini
       try {
         const imageBytes = await generateImageWithGeminiMultiTurn(
           storageCompat as any,
@@ -273,62 +302,20 @@ async function generateMeshImage(
           prompt,
           gptImageReferenceImages,
         );
-        // Gemini Multi-Turn returns png.
-        result = { imageBytes, imageCallId: null, contentType: 'image/png' };
-        provider = 'nano-banana-pro';
-      } catch (geminiError) {
-        logError(geminiError, {
-          ...sentryContext,
-          additionalContext: {
-            stage: 'nano_banana_pro_fallback',
-            hasFreshUserImages,
-            priorImageCallIdStatus,
-            ...sentryStage,
-          },
-        });
-        try {
-          const imageBytes = await generateImageWithFalFlux(
-            storageCompat as any,
-            userId,
-            conversationId,
-            prompt,
-            gptImageReferenceImages,
-          );
-          // Flux returns png per its output_format config.
-          result = { imageBytes, imageCallId: null, contentType: 'image/png' };
-          provider = 'flux';
-        } catch (fluxError) {
-          logError(fluxError, {
-            ...sentryContext,
-            additionalContext: {
-              stage: 'flux_fallback',
-              hasFreshUserImages,
-              priorImageCallIdStatus,
-              ...sentryStage,
-            },
-          });
-          throw fluxError;
-        }
+        return { imageBytes, imageCallId: null, contentType: 'image/png' };
+      } catch {
+        // Final fallback to Flux
+        const imageBytes = await generateImageWithFalFlux(
+          storageCompat as any,
+          userId,
+          conversationId,
+          prompt,
+          gptImageReferenceImages,
+        );
+        return { imageBytes, imageCallId: null, contentType: 'image/png' };
       }
     }
   }
-
-  // Diagnostic log — gated on DEBUG_LOGS. In prod, ground truth comes from:
-  //   - images.image_generation_call_id (null = fallback ran, non-null = gpt-image-2)
-  //   - Sentry events tagged stage=gpt_image_2_fallback / nano_banana_pro_fallback
-  //     / flux_fallback with full meshModel + subStage context
-  // This line stays opt-in for live debugging without polluting prod logs.
-  debugLog(
-    `[mesh] image_gen provider=${provider} meshModel=${sentryStage.meshModel}` +
-      (sentryStage.subStage ? ` subStage=${sentryStage.subStage}` : '') +
-      (provider === 'gpt-image-2'
-        ? ` quality=${QUALITY_BY_MESH_MODEL[sentryStage.meshModel]}`
-        : '') +
-      ` contentType=${result.contentType}` +
-      ` callId=${result.imageCallId ?? 'none'}`,
-  );
-
-  return result;
 }
 
 // Helper function to get the most recent mesh preview from the conversation
