@@ -10,7 +10,7 @@ on:
 env:
   AZURE_CONTAINER_REGISTRY: cadamacry4j7ueua3263k
   CONTAINER_APP_NAME: cadam-app-y4j7ueua3263k
-  RESOURCE_GROUP: rg-cadam
+  RESOURCE_GROUP: cadam-rg-y4j7ueua3263k
   IMAGE_NAME: cadam
 
 jobs:
