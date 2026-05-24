@@ -94,17 +94,18 @@ async function submitFal3D(
 
   if (data && typeof data === 'object') {
     // Try common output paths
+    const d = data as Record<string, any>;
     const outputs = [
-      data.model_mesh?.url,
-      data.model_mesh,
-      data.mesh?.url,
-      data.mesh,
-      data.glb?.url,
-      data.glb,
-      data.output?.url,
-      data.output,
-      data.video?.url,
-      data.video,
+      d.model_mesh?.url,
+      d.model_mesh,
+      d.mesh?.url,
+      d.mesh,
+      d.glb?.url,
+      d.glb,
+      d.output?.url,
+      d.output,
+      d.video?.url,
+      d.video,
     ];
     for (const out of outputs) {
       if (typeof out === 'string' && out.startsWith('http')) {
@@ -211,7 +212,7 @@ const replicateTrellis2Provider: MeshProvider = {
   timeEstimate: '~2-3 min',
   isAvailable: () => !!env('REPLICATE_API_TOKEN'),
   generate: async (imageUrl, meshId, userId, conversationId) => {
-    const client = getReplicateClient();
+    const client = getReplicateClient() as any;
     const output = (await client.run('tencent/trellis-2', {
       input: { image: imageUrl },
     })) as unknown;
