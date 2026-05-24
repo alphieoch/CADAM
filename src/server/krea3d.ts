@@ -1,5 +1,6 @@
 import { Buffer } from 'node:buffer';
 import { env } from './env';
+import { enhanceSeedImage, enhanceSeedImageLight } from './imageEnhance';
 
 const DEBUG_LOGS =
   env('ENVIRONMENT') === 'local' || env('DEBUG_LOGS') === 'true';
@@ -181,14 +182,29 @@ export async function downloadGlb(url: string): Promise<Buffer> {
 }
 
 /**
- * Full pipeline: upload image to Krea → execute 3D generation → poll → download GLB.
+ * Full pipeline: enhance image → upload to Krea → execute 3D generation → poll → download GLB.
  * Returns the GLB buffer.
  */
 export async function generateMeshWithKrea(
   imageBuffer: Buffer,
-  mimeType: string = 'image/png',
+  options: {
+    mimeType?: string;
+    enhance?: 'none' | 'light' | 'full';
+  } = {},
 ): Promise<Buffer> {
-  const imageUrl = await uploadKreaAsset(imageBuffer, mimeType);
+  const { mimeType = 'image/png', enhance = 'none' } = options;
+
+  // Pre-process the seed image to maximize detail for TRELLIS
+  let processedBuffer = imageBuffer;
+  if (enhance === 'full') {
+    debugLog('Applying full seed image enhancement...');
+    processedBuffer = await enhanceSeedImage(imageBuffer);
+  } else if (enhance === 'light') {
+    debugLog('Applying light seed image enhancement...');
+    processedBuffer = await enhanceSeedImageLight(imageBuffer);
+  }
+
+  const imageUrl = await uploadKreaAsset(processedBuffer, mimeType);
   const jobId = await executeKrea3D(imageUrl);
   const { trellisUrl } = await pollKreaJob(jobId);
   const glbBuffer = await downloadGlb(trellisUrl);

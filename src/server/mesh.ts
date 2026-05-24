@@ -15,6 +15,7 @@ import {
   executeKrea3D,
   pollKreaJob,
   downloadGlb,
+  generateMeshWithKrea,
 } from './krea3d';
 
 import { Model, MeshFileType } from '@shared/types';
@@ -724,8 +725,9 @@ async function generate3DWithKrea(
   meshId: string,
   userId: string,
   conversationId: string,
+  enhance: 'none' | 'light' | 'full' = 'none',
 ) {
-  debugLog('Starting Krea 3D generation for mesh:', meshId);
+  debugLog('Starting Krea 3D generation for mesh:', meshId, 'enhance:', enhance);
 
   // Download seed image from Azure signed URL
   const imageResponse = await fetch(imageUrl);
@@ -734,36 +736,11 @@ async function generate3DWithKrea(
   }
   const imageBuffer = Buffer.from(await imageResponse.arrayBuffer());
 
-  // Upload to Krea assets
-  const kreaImageUrl = await uploadKreaAsset(imageBuffer, 'image/png');
-
-  // Execute Krea 3D node app
-  const jobId = await executeKrea3D(kreaImageUrl);
-
-  // Poll until complete
-  const { trellisUrl } = await pollKreaJob(jobId);
-
-  // Download GLB
-  const glbBuffer = await downloadGlb(trellisUrl);
-  debugLog('Krea GLB downloaded:', glbBuffer.length, 'bytes');
-
-  // Get file_type from DB (Krea always returns GLB, but DB may have different file_type)
-  const meshTypeResult = await query(
-    'SELECT file_type FROM meshes WHERE id = $1',
-    [meshId],
-  );
-  const fileType = meshTypeResult.rows[0]?.file_type ?? 'glb';
-  // Krea always returns GLB regardless of requested file_type
-  const storageExt = 'glb';
-
-  // Upload GLB to Azure Blob (meshes container)
-  const meshStoragePath = `${userId}/${conversationId}/${meshId}.${storageExt}`;
-  await uploadBlob(
-    'meshes',
-    meshStoragePath,
-    glbBuffer,
-    'model/gltf-binary',
-  );
+  // Generate 3D mesh with optional image enhancement
+  const glbBuffer = await generateMeshWithKrea(imageBuffer, {
+    mimeType: 'image/png',
+    enhance,
+  });
 
   // Create preview record first to get the ID
   const previewInsertResult = await query(
@@ -784,6 +761,15 @@ async function generate3DWithKrea(
       'model/gltf-binary',
     );
   }
+
+  // Upload GLB to Azure Blob (meshes container)
+  const meshStoragePath = `${userId}/${conversationId}/${meshId}.glb`;
+  await uploadBlob(
+    'meshes',
+    meshStoragePath,
+    glbBuffer,
+    'model/gltf-binary',
+  );
 
   // Update mesh status to success and set file_type to glb (Krea only returns GLB)
   await query("UPDATE meshes SET status = 'success', file_type = 'glb' WHERE id = $1", [meshId]);
@@ -1155,7 +1141,7 @@ async function submitMeshJob(
         60,
       );
 
-      await generate3DWithKrea(baseImageUrl, meshId, userId, conversationId);
+      await generate3DWithKrea(baseImageUrl, meshId, userId, conversationId, 'full');
     } else if (model === 'quality') {
       debugLog('=== ENTERING QUALITY MODEL PATH ===');
 
@@ -1163,7 +1149,7 @@ async function submitMeshJob(
         throw new Error('No valid image found for quality mesh generation');
       }
 
-      await generate3DWithKrea(imageInputs[0], meshId, userId, conversationId);
+      await generate3DWithKrea(imageInputs[0], meshId, userId, conversationId, 'light');
     } else {
       debugLog('=== ENTERING FAST MODEL PATH ===');
 
@@ -1171,7 +1157,7 @@ async function submitMeshJob(
         throw new Error('No valid image found for fast mesh generation');
       }
 
-      await generate3DWithKrea(imageInputs[0], meshId, userId, conversationId);
+      await generate3DWithKrea(imageInputs[0], meshId, userId, conversationId, 'none');
     }
   } catch (error) {
     console.error('Mesh generation failed:', {
