@@ -9,7 +9,8 @@ import { useState } from 'react';
 import { useNavigate } from '@tanstack/react-router';
 
 export function UpdatePasswordView() {
-  const [password, setPassword] = useState('');
+  const [currentPassword, setCurrentPassword] = useState('');
+  const [newPassword, setNewPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const { toast } = useToast();
   const { updatePassword } = useAuth();
@@ -17,7 +18,7 @@ export function UpdatePasswordView() {
 
   const { mutate: handleUpdatePassword, isPending: isUpdatingPassword } =
     useMutation({
-      mutationFn: updatePassword,
+      mutationFn: () => updatePassword(currentPassword, newPassword),
       onSuccess: () => {
         toast({
           title: 'Success',
@@ -25,10 +26,10 @@ export function UpdatePasswordView() {
         });
         navigate({ to: '/' });
       },
-      onError: () => {
+      onError: (error: Error) => {
         toast({
           title: 'Error',
-          description: 'Failed to update password',
+          description: error.message || 'Failed to update password',
           variant: 'destructive',
         });
       },
@@ -36,7 +37,7 @@ export function UpdatePasswordView() {
 
   const handleSubmit = (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
-    if (password !== confirmPassword) {
+    if (newPassword !== confirmPassword) {
       toast({
         title: 'Error',
         description: 'Passwords do not match',
@@ -44,7 +45,15 @@ export function UpdatePasswordView() {
       });
       return;
     }
-    handleUpdatePassword(password);
+    if (newPassword.length < 6) {
+      toast({
+        title: 'Error',
+        description: 'Password must be at least 6 characters',
+        variant: 'destructive',
+      });
+      return;
+    }
+    handleUpdatePassword();
   };
 
   return (
@@ -63,15 +72,30 @@ export function UpdatePasswordView() {
           </div>
           <form onSubmit={handleSubmit} className="space-y-6">
             <div className="space-y-2">
-              <Label htmlFor="password" className="text-white">
+              <Label htmlFor="currentPassword" className="text-white">
+                Current Password
+              </Label>
+              <Input
+                id="currentPassword"
+                type="password"
+                placeholder="Enter your current password"
+                value={currentPassword}
+                onChange={(e) => setCurrentPassword(e.target.value)}
+                required
+                className="border-gray-700 bg-adam-bg-dark text-white placeholder:text-gray-400"
+              />
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="newPassword" className="text-white">
                 New Password
               </Label>
               <Input
-                id="password"
+                id="newPassword"
                 type="password"
                 placeholder="Enter your new password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
+                value={newPassword}
+                onChange={(e) => setNewPassword(e.target.value)}
                 required
                 className="border-gray-700 bg-adam-bg-dark text-white placeholder:text-gray-400"
               />
@@ -79,7 +103,7 @@ export function UpdatePasswordView() {
 
             <div className="space-y-2">
               <Label htmlFor="confirmPassword" className="text-white">
-                Confirm Password
+                Confirm New Password
               </Label>
               <Input
                 id="confirmPassword"

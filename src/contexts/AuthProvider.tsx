@@ -16,10 +16,10 @@ const LOCAL_BILLING_STATUS: BillingStatus = {
     ).toISOString(),
   },
   tokens: {
-    free: 1_000_000,
-    subscription: 1_000_000,
-    purchased: 1_000_000,
-    total: 3_000_000,
+    free: 50,
+    subscription: 10000,
+    purchased: 0,
+    total: 10050,
   },
 };
 
@@ -174,7 +174,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   };
 
   const signInWithMagicLink = async (email: string) => {
-    // Not implemented in Azure-native auth yet
     console.warn('Magic link not implemented in Azure-native auth');
     throw new Error('Magic link not available');
   };
@@ -188,21 +187,33 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   };
 
   const verifyOtp = async (email: string, token: string) => {
-    // Not implemented in Azure-native auth yet
     console.warn('OTP verification not implemented in Azure-native auth');
     throw new Error('OTP verification not available');
   };
 
   const resetPassword = async (email: string) => {
-    // Not implemented in Azure-native auth yet
-    console.warn('Password reset not implemented in Azure-native auth');
-    throw new Error('Password reset not available');
+    const res = await fetch(`${import.meta.env.BASE_URL}/api/auth/reset-password`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email }),
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({ error: 'Reset request failed' }));
+      throw new Error(data.error || 'Reset request failed');
+    }
   };
 
-  const updatePassword = async (password: string) => {
-    // Not implemented in Azure-native auth yet
-    console.warn('Password update not implemented in Azure-native auth');
-    throw new Error('Password update not available');
+  const updatePassword = async (currentPassword: string, newPassword: string) => {
+    const res = await fetch(`${import.meta.env.BASE_URL}/api/auth/update-password`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ currentPassword, newPassword }),
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({ error: 'Update failed' }));
+      throw new Error(data.error || 'Update failed');
+    }
   };
 
   return (

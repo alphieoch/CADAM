@@ -11,6 +11,7 @@ const urlResponseSchema = z.object({ url: z.string() });
 async function invokeCheckout(body: {
   priceId: string;
   trialPeriodDays?: number;
+  mode?: 'subscription' | 'payment';
 }): Promise<CheckoutResponse> {
   return apiJson(
     'billing-checkout',
@@ -61,7 +62,7 @@ export const useTokenPackPurchase = () => {
   return useMutation({
     mutationFn: async ({ priceId }: { priceId: string }) => {
       posthog.capture('token_pack_purchase_clicked', { price_id: priceId });
-      return invokeCheckout({ priceId });
+      return invokeCheckout({ priceId, mode: 'payment' });
     },
     onSuccess: (data) => {
       window.location.href = data.url;

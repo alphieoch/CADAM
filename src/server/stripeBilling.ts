@@ -1,5 +1,6 @@
 import Stripe from 'stripe';
 import { env } from './env';
+import { query } from './dbClient';
 
 export type SubscriptionLevel = 'standard' | 'pro' | 'max';
 
@@ -53,7 +54,7 @@ export type ConsumeResult = ConsumeSuccess | ConsumeFailure;
 export type RefundResult = {
   ok: true;
   tokensRefunded: number;
-  source: 'subscription' | 'purchased';
+  source: 'free' | 'subscription' | 'purchased';
   freeBalance: number;
   subscriptionBalance: number;
   purchasedBalance: number;
@@ -146,27 +147,25 @@ async function getOrCreateCustomer(email: string): Promise<string> {
   return customer.id;
 }
 
-async function _calculateTokenBalance(
-  customerId: string,
-  subscriptionLevel: 'standard' | 'pro' | 'max',
-): Promise<{ free: number; subscription: number; purchased: number; total: number }> {
-  // Base token allocation by subscription level
-  const baseTokens: Record<string, number> = {
-    standard: 4_000,
-    pro: 10_000,
-    max: 50_000,
-  };
+async function getUserIdByEmail(email: string): Promise<string | null> {
+  const result = await query<{ id: string }>(
+    'SELECT id FROM public.users WHERE email = $1 LIMIT 1',
+    [email]
+  );
+  return result.rows[0]?.id ?? null;
+}
 
-  const subscriptionTokens = baseTokens[subscriptionLevel] || 0;
-  // For now, purchased = 0 (would track from payment_intents or DB)
-  const purchasedTokens = 0;
-  const freeTokens = 1_000; // Free tier allowance
-
+async function getTokenBalancesFromDb(userId: string): Promise<{ free: number; subscription: number; purchased: number; total: number }> {
+  const result = await query<{ free_balance: number; subscription_balance: number; purchased_balance: number; total_balance: number }>(
+    'SELECT * FROM public.get_token_balances($1)',
+    [userId]
+  );
+  const row = result.rows[0];
   return {
-    free: freeTokens,
-    subscription: subscriptionTokens,
-    purchased: purchasedTokens,
-    total: freeTokens + subscriptionTokens + purchasedTokens,
+    free: row?.free_balance ?? 0,
+    subscription: row?.subscription_balance ?? 0,
+    purchased: row?.purchased_balance ?? 0,
+    total: row?.total_balance ?? 0,
   };
 }
 
@@ -191,7 +190,6 @@ export const billing = {
 
       const item = sub.items.data[0];
       const price = item.price as Stripe.Price;
-      // Fetch product metadata separately since expanding product exceeds Stripe's max depth
       const productId = typeof price.product === 'string' ? price.product : price.product?.id;
       if (productId) {
         const product = await getStripe().products.retrieve(productId);
@@ -202,11 +200,14 @@ export const billing = {
       }
     }
 
-    // Calculate token balances based on subscription + purchases
-    const tokens = await _calculateTokenBalance(customerId, subscriptionLevel);
+    // Read real token balances from database
+    const userId = await getUserIdByEmail(email);
+    const tokens = userId
+      ? await getTokenBalancesFromDb(userId)
+      : { free: 50, subscription: 0, purchased: 0, total: 50 };
 
     return {
-      user: { hasTrialed: false }, // TODO: track trials in DB
+      user: { hasTrialed: false },
       subscription: subscriptions.data.length > 0 ? {
         level: subscriptionLevel,
         status: subscriptionStatus,
@@ -217,57 +218,92 @@ export const billing = {
   },
 
   async consume(email: string, body: { tokens: number; operation?: string; referenceId?: string }): Promise<ConsumeResult> {
-    const status = await billing.getStatus(email);
-    const total = status.tokens.total;
-
-    if (total < body.tokens) {
+    const userId = await getUserIdByEmail(email);
+    if (!userId) {
       return {
         ok: false,
         reason: 'insufficient_tokens',
         tokensRequired: body.tokens,
-        tokensAvailable: total,
+        tokensAvailable: 0,
         tokensDeducted: 0,
       };
     }
 
-    // In a real implementation, you'd deduct tokens from a database
-    // For now, return success without actual deduction
+    const op = (body.operation as any) || 'mesh';
+    const result = await query<{ result: any }>(
+      'SELECT public.deduct_tokens($1, $2::public.token_operation_type, $3) as result',
+      [userId, op, body.referenceId || null]
+    );
+    const data = result.rows[0]?.result;
+
+    if (!data?.success) {
+      return {
+        ok: false,
+        reason: 'insufficient_tokens',
+        tokensRequired: body.tokens,
+        tokensAvailable: data?.tokensAvailable ?? 0,
+        tokensDeducted: 0,
+      };
+    }
+
     return {
       ok: true,
-      tokensDeducted: body.tokens,
-      freeBalance: status.tokens.free,
-      subscriptionBalance: status.tokens.subscription,
-      purchasedBalance: status.tokens.purchased,
-      totalBalance: total - body.tokens,
+      tokensDeducted: data.tokensDeducted,
+      freeBalance: data.freeBalance,
+      subscriptionBalance: data.subscriptionBalance,
+      purchasedBalance: data.purchasedBalance,
+      totalBalance: data.totalBalance,
     };
   },
 
   async refund(email: string, body: { tokens: number; operation?: string; referenceId?: string }): Promise<RefundResult> {
-    const status = await billing.getStatus(email);
+    const userId = await getUserIdByEmail(email);
+    if (!userId) {
+      return {
+        ok: true,
+        tokensRefunded: 0,
+        source: 'subscription',
+        freeBalance: 0,
+        subscriptionBalance: 0,
+        purchasedBalance: 0,
+        totalBalance: 0,
+      };
+    }
+
+    const op = (body.operation as any) || 'mesh';
+    const result = await query<{ result: any }>(
+      'SELECT public.refund_tokens($1, $2::public.token_operation_type, $3) as result',
+      [userId, op, body.referenceId || null]
+    );
+    const data = result.rows[0]?.result;
+
+    const balances = await getTokenBalancesFromDb(userId);
+
     return {
       ok: true,
-      tokensRefunded: body.tokens,
-      source: 'subscription',
-      freeBalance: status.tokens.free,
-      subscriptionBalance: status.tokens.subscription,
-      purchasedBalance: status.tokens.purchased,
-      totalBalance: status.tokens.total + body.tokens,
+      tokensRefunded: data?.tokensRefunded ?? body.tokens,
+      source: data?.subscriptionBalance > balances.subscription ? 'subscription' : 'purchased',
+      freeBalance: balances.free,
+      subscriptionBalance: balances.subscription,
+      purchasedBalance: balances.purchased,
+      totalBalance: balances.total,
     };
   },
 
   async createCheckout(
     email: string,
-    body: { priceId: string; successUrl: string; cancelUrl: string; trialPeriodDays?: number },
+    body: { priceId: string; successUrl: string; cancelUrl: string; trialPeriodDays?: number; mode?: 'subscription' | 'payment' },
   ): Promise<{ url: string }> {
     const customerId = await getOrCreateCustomer(email);
+    const mode = body.mode || 'subscription';
 
     const session = await getStripe().checkout.sessions.create({
       customer: customerId,
       line_items: [{ price: body.priceId, quantity: 1 }],
-      mode: 'subscription',
+      mode: mode as any,
       success_url: body.successUrl,
       cancel_url: body.cancelUrl,
-      subscription_data: body.trialPeriodDays
+      subscription_data: mode === 'subscription' && body.trialPeriodDays
         ? { trial_period_days: body.trialPeriodDays }
         : undefined,
     });

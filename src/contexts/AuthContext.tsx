@@ -49,7 +49,7 @@ interface AuthContextType {
   signInWithGoogle: () => Promise<void>;
   verifyOtp: (email: string, token: string) => Promise<void>;
   resetPassword: (email: string) => Promise<void>;
-  updatePassword: (password: string) => Promise<void>;
+  updatePassword: (currentPassword: string, newPassword: string) => Promise<void>;
 }
 
 export const AuthContext = createContext<AuthContextType | undefined>(

@@ -33,3 +33,6 @@ dist-ssr
 # other secret files
 .env.local
 .env.langfuse
+.playwright-mcp/
+cadam-*.yml
+cadam-*.png
